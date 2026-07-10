@@ -40,7 +40,7 @@ final class SonatypeClient {
     }
 
     JsonNode getRemediation(
-            int applicationId,
+            String applicationId,
             DependencyNode dependency,
             String stageId,
             boolean includeParentRemediation
@@ -85,7 +85,7 @@ final class SonatypeClient {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
-    JsonNode scan(int applicationId, Map<String, Object> bom) {
+    JsonNode scan(String applicationId, Map<String, Object> bom) {
         try {
             JsonNode submittedScan = send("POST",
                     "/api/v2/scan/applications/" + applicationId + "/sources/cyclonedx?stageId=build",

@@ -4,5 +4,5 @@ import java.util.List;
 
 public interface VulnerabilitiesScanner {
 
-    List<Vulnerability> scanDependencies(int projectId, DependencyNode dependencyNode);
+    List<Vulnerability> scanDependencies(String projectId, DependencyNode dependencyNode);
 }

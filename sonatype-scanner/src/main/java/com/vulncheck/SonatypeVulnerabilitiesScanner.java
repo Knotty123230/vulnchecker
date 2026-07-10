@@ -22,8 +22,11 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
     }
 
     @Override
-    public List<Vulnerability> scanDependencies(int projectId, DependencyNode dependencyNode) {
+    public List<Vulnerability> scanDependencies(String projectId, DependencyNode dependencyNode) {
         Objects.requireNonNull(dependencyNode, "dependencyNode must not be null");
+        if (isBlank(projectId)) {
+            throw new IllegalArgumentException("projectId must not be blank");
+        }
 
         List<Vulnerability> vulnerabilities = toVulnerabilities(sonatypeClient.scan(projectId, toCycloneDxBom(dependencyNode)));
         for (Vulnerability vulnerability : vulnerabilities) {
@@ -38,7 +41,7 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
     }
 
     public Optional<RemediationCandidate> findBestRemediation(
-            int applicationId,
+            String applicationId,
             DependencyNode dependency
     ) {
         JsonNode response = sonatypeClient.getRemediation(

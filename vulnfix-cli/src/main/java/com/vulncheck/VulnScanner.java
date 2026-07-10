@@ -94,7 +94,7 @@ public class VulnScanner implements Runnable {
                 required = true,
                 description = "Sonatype application ID to scan."
         )
-        private int projectId;
+        private String projectId;
         private final DependencyNodeFinder dependencyNodeFinder = new MavenDependencyNodeFinder();
         private final GraphGenerator graphGenerator = new GraphGenerator();
 
