@@ -1,0 +1,238 @@
+package com.vulncheck;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class MavenPatchWorkflowTest {
+
+    @TempDir
+    Path project;
+
+    @Test
+    void commitsPatchWhenMavenVerificationSucceeds() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithDependency("1.0.0"));
+        PatchCandidate candidate = directCandidate("1.0.0", "1.1.0");
+        List<String> console = new ArrayList<>();
+        ProjectBuildVerifier verifier = (path, ignored) -> {
+            try {
+                assertTrue(Files.readString(path.resolve("pom.xml")).contains("1.1.0"));
+                return BuildVerificationResult.success();
+            } catch (IOException exception) {
+                throw new RuntimeException(exception);
+            }
+        };
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(), verifier, console::add
+        ).applyRecommendedPatches(project, List.of(candidate));
+
+        assertEquals(1, applied.size());
+        assertTrue(Files.readString(project.resolve("pom.xml")).contains("1.1.0"));
+        assertTrue(console.stream().anyMatch(line -> line.contains("patch committed")));
+    }
+
+    @Test
+    void restoresExactPomWhenMavenVerificationFails() throws IOException {
+        String original = pomWithDependency("1.0.0");
+        Files.writeString(project.resolve("pom.xml"), original);
+        PatchCandidate candidate = directCandidate("1.0.0", "1.1.0");
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(),
+                (path, ignored) -> BuildVerificationResult.failure(1, "tests failed"),
+                ignored -> { }
+        ).applyRecommendedPatches(project, List.of(candidate));
+
+        assertTrue(applied.isEmpty());
+        assertEquals(original, Files.readString(project.resolve("pom.xml")));
+    }
+
+    @Test
+    void updatesVersionPropertyOwnedByEffectiveModel() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithProperty("4.1.100.Final"));
+        Vulnerability vulnerability = vulnerability("4.1.100.Final", "4.1.110.Final");
+        DependencyNode node = node("4.1.100.Final");
+        VersionOwner owner = new VersionOwner(
+                VersionOwnerType.LOCAL_PROPERTY,
+                new ComponentCoordinate("io.netty", "netty-handler", "4.1.100.Final"),
+                "netty.version",
+                project.resolve("pom.xml")
+        );
+        MutationPoint point = new MutationPoint(
+                MutationType.UPDATE_PROPERTY, owner.coordinate(), node, owner
+        );
+        FixCandidate fix = new FixCandidate(
+                vulnerability,
+                node,
+                new FixCandidate.ComponentFix(
+                        List.of(), new ComponentCoordinate("io.netty", "netty-handler", "4.1.110.Final")
+                ),
+                false,
+                List.of()
+        );
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(), (path, ignored) -> BuildVerificationResult.success(), ignored -> { }
+        ).applyRecommendedPatches(project, List.of(new PatchCandidate(point, fix)));
+
+        assertEquals(1, applied.size());
+        assertTrue(Files.readString(project.resolve("pom.xml")).contains(
+                "<netty.version>4.1.110.Final</netty.version>"
+        ));
+    }
+
+    @Test
+    void updatesImportedBomEvenThoughBomIsAbsentFromRuntimeDependencyTree() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithImportedBom("4.1.100.Final"));
+        Vulnerability vulnerability = vulnerability("4.1.100.Final", "4.1.110.Final");
+        DependencyNode vulnerableNode = node("4.1.100.Final");
+        ComponentCoordinate currentBom = new ComponentCoordinate("io.netty", "netty-bom", "4.1.100.Final");
+        ComponentCoordinate replacementBom = new ComponentCoordinate("io.netty", "netty-bom", "4.1.110.Final");
+        VersionOwner owner = new VersionOwner(
+                VersionOwnerType.IMPORTED_BOM, currentBom, null, project.resolve("pom.xml")
+        );
+        MutationPoint point = new MutationPoint(
+                MutationType.UPDATE_IMPORTED_BOM, currentBom, vulnerableNode, owner
+        );
+        FixCandidate fix = new FixCandidate(
+                vulnerability,
+                vulnerableNode,
+                new FixCandidate.ComponentFix(List.of(), replacementBom),
+                false,
+                List.of()
+        );
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(), (path, ignored) -> BuildVerificationResult.success(), ignored -> { }
+        ).applyRecommendedPatches(project, List.of(new PatchCandidate(point, fix)));
+
+        assertEquals(1, applied.size());
+        assertTrue(Files.readString(project.resolve("pom.xml")).contains("4.1.110.Final"));
+    }
+
+    @Test
+    void rollsBackStillVulnerableVersionAndTriesTheNextHigherVersion() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithDependency("1.0.0"));
+        PatchCandidate first = directCandidate("1.0.0", "1.1.0");
+        PatchCandidate second = directCandidate("1.0.0", "1.2.0");
+        PatchSecurityVerifier securityVerifier = (path, candidate) ->
+                candidate.candidate().replacement().coordinate().version().equals("1.1.0")
+                        ? SecurityVerificationResult.unsafe("CVE-test remains")
+                        : SecurityVerificationResult.safeResult();
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(),
+                (path, candidate) -> BuildVerificationResult.success(),
+                securityVerifier,
+                ignored -> { }
+        ).applyRecommendedPatches(project, List.of(first, second));
+
+        assertEquals(1, applied.size());
+        assertEquals("1.2.0", applied.getFirst().candidate().candidate().replacement().coordinate().version());
+        String patchedPom = Files.readString(project.resolve("pom.xml"));
+        assertTrue(patchedPom.contains("1.2.0"));
+        assertTrue(!patchedPom.contains("1.1.0"));
+    }
+
+    private PatchCandidate directCandidate(String currentVersion, String replacementVersion) {
+        Vulnerability vulnerability = vulnerability(currentVersion, replacementVersion);
+        DependencyNode node = node(currentVersion);
+        ComponentCoordinate current = new ComponentCoordinate("io.netty", "netty-handler", currentVersion);
+        MutationPoint point = new MutationPoint(
+                MutationType.UPDATE_DIRECT_DEPENDENCY,
+                current,
+                node,
+                new VersionOwner(VersionOwnerType.DIRECT_DEPENDENCY, current, null, project.resolve("pom.xml"))
+        );
+        FixCandidate fix = new FixCandidate(
+                vulnerability,
+                node,
+                new FixCandidate.ComponentFix(
+                        List.of(), new ComponentCoordinate("io.netty", "netty-handler", replacementVersion)
+                ),
+                true,
+                List.of()
+        );
+        return new PatchCandidate(point, fix);
+    }
+
+    private Vulnerability vulnerability(String currentVersion, String replacementVersion) {
+        Vulnerability vulnerability = new Vulnerability(
+                "CVE-test", "io.netty", "netty-handler", currentVersion, "high", "", ""
+        );
+        vulnerability.setRemediationCandidate(new RemediationCandidate(
+                "upgrade",
+                new ComponentCoordinate("io.netty", "netty-handler", replacementVersion),
+                true,
+                List.of()
+        ));
+        return vulnerability;
+    }
+
+    private DependencyNode node(String version) {
+        return new DependencyNode("netty-handler", "io.netty", version, "compile", List.of());
+    }
+
+    private String pomWithDependency(String version) {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencies>
+                    <dependency>
+                      <groupId>io.netty</groupId>
+                      <artifactId>netty-handler</artifactId>
+                      <version>%s</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """.formatted(version);
+    }
+
+    private String pomWithProperty(String version) {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <properties>
+                    <netty.version>%s</netty.version>
+                  </properties>
+                </project>
+                """.formatted(version);
+    }
+
+    private String pomWithImportedBom(String version) {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>io.netty</groupId>
+                        <artifactId>netty-bom</artifactId>
+                        <version>%s</version>
+                        <type>pom</type>
+                        <scope>import</scope>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """.formatted(version);
+    }
+}

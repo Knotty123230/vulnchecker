@@ -1,11 +1,13 @@
 package com.vulncheck;
 
+import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.time.Duration;
 import java.util.EnumSet;
 import java.util.Properties;
 
@@ -18,6 +20,12 @@ final class VulnScannerConfigStore {
     private static final String API_KEY = "sonatype.api-key";
     private static final String REQUEST_TIMEOUT = "sonatype.request-timeout";
     private static final String SCAN_TIMEOUT = "sonatype.scan-timeout";
+    private static final String NEXUS_BASE_URL = "nexus.base-url";
+    private static final String NEXUS_REPOSITORY = "nexus.repository";
+    private static final String NEXUS_USERNAME = "nexus.username";
+    private static final String NEXUS_PASSWORD = "nexus.password";
+    private static final String NEXUS_BEARER_TOKEN = "nexus.bearer-token";
+    private static final String NEXUS_REQUEST_TIMEOUT = "nexus.request-timeout";
 
     Path save(VulnScannerConfiguration configuration, boolean overwrite) {
         Path configPath = configPath();
@@ -28,14 +36,7 @@ final class VulnScannerConfigStore {
             }
             setOwnerOnlyDirectoryPermissions(configPath.getParent());
 
-            Properties properties = new Properties();
-            SonatypeCredentials credentials = configuration.credentials();
-            properties.setProperty(BASE_URL, credentials.baseUrl());
-            properties.setProperty(USERNAME, credentials.username());
-            properties.setProperty(PASSWORD, credentials.password());
-            properties.setProperty(API_KEY, nullToEmpty(credentials.apiKey()));
-            properties.setProperty(REQUEST_TIMEOUT, nullToEmpty(credentials.requestTimeout()));
-            properties.setProperty(SCAN_TIMEOUT, nullToEmpty(credentials.scanTimeout()));
+            Properties properties = getProperties(configuration);
 
             try (OutputStream output = Files.newOutputStream(configPath)) {
                 properties.store(output, "VulnScanner local configuration");
@@ -45,6 +46,28 @@ final class VulnScannerConfigStore {
         } catch (IOException e) {
             throw new IllegalStateException("Unable to save configuration to " + configPath, e);
         }
+    }
+
+    @Nonnull
+    private Properties getProperties(VulnScannerConfiguration configuration) {
+        Properties properties = new Properties();
+        SonatypeCredentials credentials = configuration.credentials();
+        properties.setProperty(BASE_URL, credentials.baseUrl());
+        properties.setProperty(USERNAME, credentials.username());
+        properties.setProperty(PASSWORD, credentials.password());
+        properties.setProperty(API_KEY, nullToEmpty(credentials.apiKey()));
+        properties.setProperty(REQUEST_TIMEOUT, nullToEmpty(credentials.requestTimeout()));
+        properties.setProperty(SCAN_TIMEOUT, nullToEmpty(credentials.scanTimeout()));
+        NexusRepositoryConfiguration nexus = configuration.nexusRepository();
+        if (nexus != null) {
+            properties.setProperty(NEXUS_BASE_URL, nexus.baseUrl());
+            properties.setProperty(NEXUS_REPOSITORY, nexus.repository());
+            properties.setProperty(NEXUS_USERNAME, nullToEmpty(nexus.username()));
+            properties.setProperty(NEXUS_PASSWORD, nullToEmpty(nexus.password()));
+            properties.setProperty(NEXUS_BEARER_TOKEN, nullToEmpty(nexus.bearerToken()));
+            properties.setProperty(NEXUS_REQUEST_TIMEOUT, nexus.requestTimeout().toString());
+        }
+        return properties;
     }
 
     VulnScannerConfiguration load() {
@@ -68,7 +91,24 @@ final class VulnScannerConfigStore {
                         required(properties, BASE_URL),
                         emptyToNull(properties.getProperty(REQUEST_TIMEOUT)),
                         emptyToNull(properties.getProperty(SCAN_TIMEOUT))
-                )
+                ),
+                nexusConfiguration(properties)
+        );
+    }
+
+    private NexusRepositoryConfiguration nexusConfiguration(Properties properties) {
+        String baseUrl = emptyToNull(properties.getProperty(NEXUS_BASE_URL));
+        if (baseUrl == null) {
+            return null;
+        }
+        String timeout = emptyToNull(properties.getProperty(NEXUS_REQUEST_TIMEOUT));
+        return new NexusRepositoryConfiguration(
+                baseUrl,
+                required(properties, NEXUS_REPOSITORY),
+                emptyToNull(properties.getProperty(NEXUS_USERNAME)),
+                emptyToNull(properties.getProperty(NEXUS_PASSWORD)),
+                emptyToNull(properties.getProperty(NEXUS_BEARER_TOKEN)),
+                timeout == null ? Duration.ofSeconds(30) : Duration.parse(timeout)
         );
     }
 

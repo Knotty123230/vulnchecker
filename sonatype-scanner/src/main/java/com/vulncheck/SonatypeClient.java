@@ -41,18 +41,16 @@ final class SonatypeClient {
 
     JsonNode getRemediation(
             String applicationId,
-            DependencyNode dependency,
-            String stageId,
-            boolean includeParentRemediation
+            DependencyNode dependency
     ) {
         Objects.requireNonNull(dependency, "dependency must not be null");
 
-        String stage = isBlank(stageId) ? "develop" : stageId;
+        String stage = "develop";
 
         String path = "/api/v2/components/remediation/application/"
                 + applicationId
                 + "?stageId=" + encode(stage)
-                + "&includeParentRemediation=" + includeParentRemediation;
+                + "&includeParentRemediation=" + true;
 
         Map<String, Object> body = Map.of(
                 "packageUrl", dependency.toPkg("maven") + "?type=jar"

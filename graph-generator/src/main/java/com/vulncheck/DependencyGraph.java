@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 public record DependencyGraph(
@@ -79,5 +80,31 @@ public record DependencyGraph(
 
     public String toString() {
         return graph.toString();
+    }
+
+    public Iterable<DependencyNode> findNodesByComponent(String component) {
+        return () -> graph.vertexSet().stream()
+                .filter(node -> node.toPkg("maven").equals(component))
+                .iterator();
+    }
+
+    public Iterable<DependencyNode> findParentNodes(List<DependencyNode> nodes) {
+        return () -> nodes.stream()
+                .filter(node -> graph.degreeOf(node) > 0)
+                .flatMap(node -> graph.incomingEdgesOf(node).stream())
+                .map(graph::getEdgeSource)
+                .iterator();
+    }
+
+    public Iterable<DependencyNode> findNodesByGroupId(String groupId) {
+        return () -> graph.vertexSet().stream()
+                .filter(node -> node.groupId().equals(groupId))
+                .iterator();
+    }
+
+    public Iterable<DependencyNode> findNodesByGroupIdAndArtifactId(String groupId, String artifactId) {
+        return () -> graph.vertexSet().stream()
+                .filter(node -> node.groupId().equals(groupId) && node.artifactId().equals(artifactId))
+                .iterator();
     }
 }

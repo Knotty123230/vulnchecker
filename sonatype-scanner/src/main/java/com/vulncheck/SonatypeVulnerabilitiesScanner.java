@@ -55,9 +55,7 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
     ) {
         JsonNode response = sonatypeClient.getRemediation(
                 applicationId,
-                dependency,
-                "develop",
-                true
+                dependency
         );
 
         List<RemediationCandidate> candidates =

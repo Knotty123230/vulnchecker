@@ -15,6 +15,7 @@
         <module>vulnfix-cli</module>
         <module>graph-generator</module>
         <module>sonatype-scanner</module>
+        <module>vulnerabilities</module>
     </modules>
 
     <properties>
@@ -24,6 +25,8 @@
         <asm.version>3.3.1</asm.version>
         <asm.tree.version>9.10.1</asm.tree.version>
         <junit.version>5.10.0</junit.version>
+        <maven.invoker.version>3.3.0</maven.invoker.version>
+        <maven.artifact.version>3.9.11</maven.artifact.version>
     </properties>
 
 

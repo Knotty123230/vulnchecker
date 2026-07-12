@@ -56,6 +56,29 @@ public class VulnScanner implements Runnable {
                 description = "Total scan wait timeout in ISO-8601 duration format.")
         private String scanTimeout;
 
+        @CommandLine.Option(names = "--nexus-base-url",
+                description = "Optional Nexus Repository base URL, for example https://nexus.example.com.")
+        private String nexusBaseUrl;
+
+        @CommandLine.Option(names = "--nexus-repository",
+                description = "Nexus Maven repository name used for version discovery.")
+        private String nexusRepository;
+
+        @CommandLine.Option(names = "--nexus-username", description = "Optional Nexus username.")
+        private String nexusUsername;
+
+        @CommandLine.Option(names = "--nexus-password", interactive = true,
+                description = "Optional Nexus password.")
+        private String nexusPassword;
+
+        @CommandLine.Option(names = "--nexus-token", interactive = true,
+                description = "Optional Nexus bearer token.")
+        private String nexusToken;
+
+        @CommandLine.Option(names = "--nexus-timeout", defaultValue = "PT30S",
+                description = "Nexus request timeout in ISO-8601 duration format.")
+        private String nexusTimeout;
+
         @CommandLine.Option(names = {"-f", "--force"},
                 description = "Overwrite an existing configuration.")
         private boolean force;
@@ -63,10 +86,25 @@ public class VulnScanner implements Runnable {
         @Override
         public void run() {
             VulnScannerConfiguration configuration = new VulnScannerConfiguration(
-                    new SonatypeCredentials(username, password, apiKey, baseUrl, requestTimeout, scanTimeout)
+                    new SonatypeCredentials(username, password, apiKey, baseUrl, requestTimeout, scanTimeout),
+                    nexusConfiguration()
             );
             Path configPath = new VulnScannerConfigStore().save(configuration, force);
             System.out.println("Configuration saved to " + configPath);
+        }
+
+        private NexusRepositoryConfiguration nexusConfiguration() {
+            if (nexusBaseUrl == null || nexusBaseUrl.isBlank()) {
+                return null;
+            }
+            return new NexusRepositoryConfiguration(
+                    nexusBaseUrl,
+                    nexusRepository,
+                    nexusUsername,
+                    nexusPassword,
+                    nexusToken,
+                    java.time.Duration.parse(nexusTimeout)
+            );
         }
     }
 
@@ -98,15 +136,52 @@ public class VulnScanner implements Runnable {
         private final DependencyNodeFinder dependencyNodeFinder = new MavenDependencyNodeFinder();
         private final GraphGenerator graphGenerator = new GraphGenerator();
 
+
         @Override
         public void run() {
             VulnScannerConfiguration configuration = new VulnScannerConfigStore().load();
             DependencyNode dependencyNode = dependencyNodeFinder.find(path);
             DependencyGraph graph = graphGenerator.generateGraph(dependencyNode);
+            //TODO: here maven project, but can be gradle or other, then add other package managers
             VulnerabilitiesScanner sonatypeVulnerabilitiesScanner = new SonatypeVulnerabilitiesScanner(configuration.credentials());
             List<Vulnerability> vulnerabilities = sonatypeVulnerabilitiesScanner.scanDependencies(projectId, dependencyNode);
 
             printReport(vulnerabilities);
+            ComponentVersionRepository versionRepository = configuration.nexusRepository() == null
+                    ? ComponentVersionRepository.empty()
+                    : new ResilientComponentVersionRepository(
+                            new NexusComponentVersionRepository(configuration.nexusRepository()),
+                            System.out::println
+                    );
+            if (configuration.nexusRepository() == null) {
+                System.out.println("Nexus is not configured; repository version fallback is disabled.");
+            }
+            List<PatchCandidate> candidates = new VulnerabilitiesFixer(vulnerabilities, graph, path, versionRepository)
+                    .findPatchCandidates();
+
+            System.out.println();
+            System.out.println("Found %d actionable patch candidate(s).".formatted(candidates.size()));
+            MavenPatchWorkflow patchWorkflow = new MavenPatchWorkflow(
+                    new MavenPomPatcher(),
+                    new MavenProjectBuildVerifier(),
+                    new SonatypePatchSecurityVerifier(
+                            projectId, dependencyNodeFinder, sonatypeVulnerabilitiesScanner
+                    ),
+                    System.out::println
+            );
+            List<AppliedPatch> applied = patchWorkflow.applyRecommendedPatches(path, candidates);
+            System.out.println();
+            System.out.println("Applied %d verified patch(es).".formatted(applied.size()));
+
+            if (!applied.isEmpty()) {
+                System.out.println("Rebuilding dependency graph and rescanning with Sonatype...");
+                dependencyNode = dependencyNodeFinder.find(path);
+                graph = graphGenerator.generateGraph(dependencyNode);
+                vulnerabilities = sonatypeVulnerabilitiesScanner.scanDependencies(projectId, dependencyNode);
+                System.out.println();
+                System.out.println("Post-patch vulnerability report:");
+                printReport(vulnerabilities);
+            }
 
             if (svgPath != null) {
                 Path outputPath = graph.exportSvg(svgPath.normalize());
@@ -150,7 +225,7 @@ public class VulnScanner implements Runnable {
                 String sevColor = vulns.stream()
                         .anyMatch(v -> "critical".equals(v.getSeverity())) ? RED
                         : vulns.stream().anyMatch(v -> "severe".equals(v.getSeverity())) ? RED
-                        : YELLOW;
+                          : YELLOW;
 
                 // Component line
                 String component = first.getGroupId() + ":" + first.getArtifactId();
