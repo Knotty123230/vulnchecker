@@ -21,6 +21,14 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
         this.sonatypeClient = new SonatypeClient(sonatypeCredentials);
     }
 
+    /**
+     * Lists all applications registered in Sonatype IQ.
+     * @return list of [publicId, name] pairs
+     */
+    public List<String[]> listApplications() {
+        return sonatypeClient.listApplications();
+    }
+
     @Override
     public List<Vulnerability> scanDependencies(String projectId, DependencyNode dependencyNode) {
         Objects.requireNonNull(dependencyNode, "dependencyNode must not be null");
@@ -30,9 +38,22 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
 
         String internalId = sonatypeClient.resolveInternalId(projectId);
 
-        List<Vulnerability> vulnerabilities = toVulnerabilities(sonatypeClient.scan(internalId, toCycloneDxBom(dependencyNode)));
+        List<Vulnerability> rawVulnerabilities = toVulnerabilities(sonatypeClient.scan(internalId, toCycloneDxBom(dependencyNode)));
 
-        // Fetch remediations in parallel using virtual threads
+        // Merge by component: one Vulnerability per unique groupId:artifactId:version
+        Map<String, Vulnerability> merged = new LinkedHashMap<>();
+        for (Vulnerability v : rawVulnerabilities) {
+            String key = v.getGroupId() + ":" + v.getArtifactId() + ":" + v.getVersion();
+            Vulnerability existing = merged.get(key);
+            if (existing == null) {
+                merged.put(key, v);
+            } else {
+                existing.addCve(v.getId(), v.getSeverity());
+            }
+        }
+        List<Vulnerability> vulnerabilities = new ArrayList<>(merged.values());
+
+        // Fetch remediations in parallel — one per unique component
         try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             List<java.util.concurrent.Future<Void>> futures = vulnerabilities.stream()
                     .map(vulnerability -> executor.submit((java.util.concurrent.Callable<Void>) () -> {
@@ -47,13 +68,11 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
                             Optional<RemediationCandidate> bestCandidate = findBestRemediation(internalId, vulnerableComponent);
                             bestCandidate.ifPresent(vulnerability::setRemediationCandidate);
                         } catch (Exception ignored) {
-                            // Skip remediation if individual call fails
                         }
                         return null;
                     }))
                     .toList();
 
-            // Wait for all to complete
             for (var future : futures) {
                 try { future.get(); } catch (Exception ignored) {}
             }

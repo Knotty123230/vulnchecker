@@ -129,8 +129,7 @@ public class VulnScanner implements Runnable {
         private Path svgPath;
         @CommandLine.Option(
                 names = {"-id", "--project-id"},
-                required = true,
-                description = "Sonatype application ID to scan."
+                description = "Sonatype application ID to scan. If not specified, searches by project directory name."
         )
         private String projectId;
         private final DependencyNodeFinder dependencyNodeFinder = new MavenDependencyNodeFinder();
@@ -140,6 +139,16 @@ public class VulnScanner implements Runnable {
         @Override
         public void run() {
             VulnScannerConfiguration configuration = new VulnScannerConfigStore().load();
+
+            // Resolve project ID if not specified
+            if (projectId == null || projectId.isBlank()) {
+                projectId = resolveProjectId(configuration);
+                if (projectId == null) {
+                    System.err.println("No application ID specified and could not auto-detect. Use --project-id");
+                    return;
+                }
+            }
+
             DependencyNode dependencyNode = dependencyNodeFinder.find(path);
             DependencyGraph graph = graphGenerator.generateGraph(dependencyNode);
             //TODO: here maven project, but can be gradle or other, then add other package managers
@@ -236,6 +245,97 @@ public class VulnScanner implements Runnable {
             if (svgPath != null) {
                 Path outputPath = graph.exportSvg(svgPath.normalize());
                 System.out.println("Dependency graph exported to %s".formatted(outputPath));
+            }
+        }
+
+        /**
+         * Resolves project ID by fuzzy-searching Sonatype IQ applications using the project directory name.
+         */
+        private String resolveProjectId(VulnScannerConfiguration configuration) {
+            String BOLD = "\033[1m";
+            String CYAN = "\033[0;36m";
+            String GREEN = "\033[0;32m";
+            String DIM = "\033[2m";
+            String RESET = "\033[0m";
+
+            SonatypeVulnerabilitiesScanner client = new SonatypeVulnerabilitiesScanner(configuration.credentials());
+            String query = path.toAbsolutePath().normalize().getFileName().toString();
+            System.out.println("Searching Sonatype IQ for '" + BOLD + query + RESET + "'...");
+
+            List<String[]> allApps = client.listApplications();
+            if (allApps.isEmpty()) {
+                System.err.println("Failed to fetch applications from Sonatype IQ.");
+                return null;
+            }
+
+            while (true) {
+                String queryLower = query.toLowerCase();
+                // Tokenize query for fuzzy matching
+                String[] tokens = query.replaceAll("([a-z])([A-Z])", "$1 $2")
+                        .replaceAll("[-_]+", " ").toLowerCase().split("\\s+");
+
+                List<String[]> matches = allApps.stream()
+                        .map(app -> {
+                            String text = (app[0] + " " + app[1]).toLowerCase();
+                            int score = 0;
+                            for (String tok : tokens) {
+                                if (tok.length() >= 2 && text.contains(tok)) score++;
+                            }
+                            if (text.contains(queryLower)) score += 10;
+                            return new Object[]{score, app};
+                        })
+                        .filter(r -> (int) r[0] > 0)
+                        .sorted((a, b) -> Integer.compare((int) b[0], (int) a[0]))
+                        .limit(15)
+                        .map(r -> (String[]) r[1])
+                        .toList();
+
+                if (matches.isEmpty()) {
+                    System.out.println("  No matches for '" + query + "'");
+                    System.out.print("  Enter search term (or exact app ID, 'q' to quit): ");
+                    try {
+                        java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
+                        query = reader.readLine();
+                        if (query == null || query.trim().equalsIgnoreCase("q")) return null;
+                        query = query.trim();
+                        // Check if exact ID
+                        String exactQuery = query;
+                        if (allApps.stream().anyMatch(a -> a[0].equals(exactQuery))) return exactQuery;
+                    } catch (java.io.IOException e) { return null; }
+                    continue;
+                }
+
+                if (matches.size() == 1) {
+                    String selected = matches.getFirst()[0];
+                    System.out.println("  " + GREEN + "✓" + RESET + " Auto-selected: " + BOLD + selected + RESET
+                            + " (" + matches.getFirst()[1] + ")");
+                    return selected;
+                }
+
+                // Multiple matches — show list
+                System.out.println();
+                System.out.println(BOLD + "Select application:" + RESET);
+                for (int i = 0; i < matches.size(); i++) {
+                    System.out.printf("  %s%2d)%s %s  %s%s%s%n", CYAN, i + 1, RESET,
+                            matches.get(i)[0], DIM, matches.get(i)[1], RESET);
+                }
+                System.out.println();
+                System.out.print("  Number (or new search, 'q' to quit): ");
+                try {
+                    java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in));
+                    String input = reader.readLine();
+                    if (input == null || input.trim().equalsIgnoreCase("q")) return null;
+                    input = input.trim();
+                    if (input.matches("\\d+")) {
+                        int idx = Integer.parseInt(input) - 1;
+                        if (idx >= 0 && idx < matches.size()) {
+                            String selected = matches.get(idx)[0];
+                            System.out.println("  " + GREEN + "✓" + RESET + " Selected: " + BOLD + selected + RESET);
+                            return selected;
+                        }
+                    }
+                    query = input;
+                } catch (java.io.IOException e) { return null; }
             }
         }
 
@@ -432,80 +532,55 @@ public class VulnScanner implements Runnable {
             String RED = "\033[0;31m";
             String YELLOW = "\033[1;33m";
             String GREEN = "\033[0;32m";
-            String CYAN = "\033[0;36m";
             String BOLD = "\033[1m";
             String DIM = "\033[2m";
             String RESET = "\033[0m";
 
             System.out.println();
-            System.out.println(BOLD + "Found " + vulnerabilities.size() + " vulnerabilities" + RESET);
+            System.out.println(BOLD + "Found " + vulnerabilities.size() + " vulnerable components" + RESET);
             System.out.println(DIM + "─".repeat(70) + RESET);
-
-            // Group by component
-            java.util.Map<String, List<Vulnerability>> grouped = new java.util.LinkedHashMap<>();
-            for (Vulnerability v : vulnerabilities) {
-                String key = v.getGroupId() + ":" + v.getArtifactId() + ":" + v.getVersion();
-                grouped.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(v);
-            }
 
             int fixable = 0;
             int unfixable = 0;
 
-            for (var entry : grouped.entrySet()) {
-                List<Vulnerability> vulns = entry.getValue();
-                Vulnerability first = vulns.getFirst();
-                RemediationCandidate remediation = vulns.stream()
-                        .map(Vulnerability::getRemediationCandidate)
-                        .filter(java.util.Objects::nonNull)
-                        .findFirst()
-                        .orElse(null);
+            for (Vulnerability v : vulnerabilities) {
+                RemediationCandidate remediation = v.getRemediationCandidate();
 
-                // Severity color for the worst CVE in this component
-                String sevColor = vulns.stream()
-                        .anyMatch(v -> "critical".equals(v.getSeverity())) ? RED
-                        : vulns.stream().anyMatch(v -> "severe".equals(v.getSeverity())) ? RED
-                          : YELLOW;
+                String sevColor = switch (v.getSeverity() != null ? v.getSeverity().toLowerCase() : "") {
+                    case "critical" -> RED;
+                    case "severe" -> RED;
+                    default -> YELLOW;
+                };
 
                 // Component line
-                String component = first.getGroupId() + ":" + first.getArtifactId();
-                System.out.printf("%n  %s●%s %s%s%s : %s%s", sevColor, RESET, BOLD, component, RESET, first.getVersion(), RESET);
+                String component = v.getGroupId() + ":" + v.getArtifactId();
+                System.out.printf("%n  %s●%s %s%s%s : %s", sevColor, RESET, BOLD, component, RESET, v.getVersion());
 
                 if (remediation != null && remediation.target() != null) {
                     System.out.printf("  →  %s%s%s", GREEN, remediation.target().version(), RESET);
                     fixable++;
 
-                    // Parent info (transitive dependency)
                     if (!remediation.directDependency() && remediation.parentCandidates() != null && !remediation.parentCandidates().isEmpty()) {
                         ComponentCoordinate parent = remediation.parentCandidates().getFirst();
                         System.out.printf("  %s(via %s:%s → %s)%s",
                                 DIM, parent.groupId(), parent.artifactId(), parent.version(), RESET);
                     }
-
-                    System.out.printf("  %s[%s]%s", DIM, remediation.type(), RESET);
                 } else {
                     System.out.printf("  %s(no fix available)%s", DIM, RESET);
                     unfixable++;
                 }
                 System.out.println();
 
-                // CVE list
-                for (Vulnerability v : vulns) {
-                    String severity = v.getSeverity() != null ? v.getSeverity().toUpperCase() : "?";
-                    String sColor = switch (severity) {
-                        case "CRITICAL" -> RED;
-                        case "SEVERE" -> RED;
-                        case "MODERATE" -> YELLOW;
-                        default -> DIM;
-                    };
-                    System.out.printf("    %s%-8s%s %s%s%s%n", sColor, severity, RESET, DIM, v.getId(), RESET);
-                }
+                // CVE IDs inline
+                String cves = String.join(", ", v.getCveIds());
+                System.out.printf("    %s%s%s %s%s%s%n", sevColor, v.getSeverity() != null ? v.getSeverity().toUpperCase() : "?", RESET, DIM, cves, RESET);
             }
 
             // Summary
             System.out.println();
             System.out.println(DIM + "─".repeat(70) + RESET);
             System.out.printf("%s%d%s components affected, %s%s%d fixable%s, %s%d without fix%s%n",
-                    BOLD, grouped.size(), RESET,
+                    BOLD, vulnerabilities.size(), RESET,
                     GREEN, BOLD, fixable, RESET,
                     DIM, unfixable, RESET);
             System.out.println();

@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -90,6 +91,25 @@ final class SonatypeClient {
                     "Sonatype IQ returned an application without an internal ID for publicId '" + publicId + "'");
         }
         return internalId;
+    }
+
+    /**
+     * Fetches all applications from Sonatype IQ.
+     * Returns a list of [publicId, name] pairs.
+     */
+    List<String[]> listApplications() {
+        JsonNode response = send("GET", "/api/v2/applications", null);
+        JsonNode applications = response.path("applications");
+        if (!applications.isArray()) {
+            return List.of();
+        }
+        List<String[]> result = new java.util.ArrayList<>();
+        for (JsonNode app : applications) {
+            String publicId = app.path("publicId").asText("");
+            String name = app.path("name").asText("");
+            result.add(new String[]{publicId, name});
+        }
+        return result;
     }
 
     JsonNode scan(String applicationId, Map<String, Object> bom) {
