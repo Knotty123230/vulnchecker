@@ -70,6 +70,25 @@ public final class RemediationMutationPointResolver implements MutationPointReso
             );
         }
 
+        // Fallback: if still no points, use the dependency tree to find who pulls this artifact
+        // and create a mutation point to upgrade that parent instead of overriding
+        if (points.isEmpty() && !vulnerableNodes.isEmpty()) {
+            List<DependencyNode> parents = new ArrayList<>();
+            graph.findParentNodes(vulnerableNodes).forEach(parents::add);
+            // Filter to parents that are likely direct dependencies (have their own version declared)
+            parents.stream()
+                    .filter(parent -> parent.version() != null && !parent.version().isBlank())
+                    .distinct()
+                    .forEach(parent -> points.add(new MutationPoint(
+                            MutationType.UPDATE_DIRECT_DEPENDENCY,
+                            new ComponentCoordinate(parent.groupId(), parent.artifactId(), parent.version()),
+                            parent,
+                            new VersionOwner(VersionOwnerType.UNKNOWN,
+                                    new ComponentCoordinate(parent.groupId(), parent.artifactId(), parent.version()),
+                                    null, null)
+                    )));
+        }
+
         return points.stream().distinct().toList();
     }
 

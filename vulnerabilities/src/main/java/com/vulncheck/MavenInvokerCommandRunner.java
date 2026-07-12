@@ -2,6 +2,7 @@ package com.vulncheck;
 
 import org.apache.maven.shared.invoker.DefaultInvocationRequest;
 import org.apache.maven.shared.invoker.DefaultInvoker;
+import org.apache.maven.shared.invoker.InvocationOutputHandler;
 import org.apache.maven.shared.invoker.InvocationRequest;
 import org.apache.maven.shared.invoker.InvocationResult;
 import org.apache.maven.shared.invoker.MavenInvocationException;
@@ -13,6 +14,7 @@ import java.util.Properties;
 /** Executes Maven through the Maven Shared Invoker API rather than shell parsing. */
 public final class MavenInvokerCommandRunner implements MavenCommandRunner {
 
+    private static final InvocationOutputHandler SILENT = line -> {};
     private static final String EFFECTIVE_POM_GOAL =
             "org.apache.maven.plugins:maven-help-plugin:3.5.2:effective-pom";
     private static final String DEPENDENCY_TREE_GOAL =
@@ -35,12 +37,24 @@ public final class MavenInvokerCommandRunner implements MavenCommandRunner {
         request.setBaseDirectory(pom.getParent().toFile());
         request.setBatchMode(true);
         request.setRecursive(false);
-        request.setShowErrors(true);
+        request.setShowErrors(false);
+        request.setQuiet(true);
+        request.setOutputHandler(SILENT);
+        request.setErrorHandler(SILENT);
+        request.setThreads("1C");
         request.setGoals(List.of(EFFECTIVE_POM_GOAL, DEPENDENCY_TREE_GOAL));
         request.setProperties(properties);
 
         try {
-            InvocationResult result = new DefaultInvoker().execute(request);
+            DefaultInvoker invoker = new DefaultInvoker();
+            invoker.setOutputHandler(SILENT);
+            invoker.setErrorHandler(SILENT);
+            String mavenHome = MavenHomeResolver.resolve();
+            if (mavenHome != null) {
+                invoker.setMavenHome(new java.io.File(mavenHome));
+            }
+
+            InvocationResult result = invoker.execute(request);
             if (result.getExitCode() != 0) {
                 throw new MavenAnalysisException(
                         "Maven analysis failed with exit code " + result.getExitCode(),

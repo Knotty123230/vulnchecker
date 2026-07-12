@@ -31,21 +31,34 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
         String internalId = sonatypeClient.resolveInternalId(projectId);
 
         List<Vulnerability> vulnerabilities = toVulnerabilities(sonatypeClient.scan(internalId, toCycloneDxBom(dependencyNode)));
-        for (Vulnerability vulnerability : vulnerabilities) {
-            DependencyNode vulnerableComponent = new DependencyNode(
-                    vulnerability.getArtifactId(),
-                    vulnerability.getGroupId(),
-                    vulnerability.getVersion(),
-                    null,
-                    null
-            );
-            Optional<RemediationCandidate> bestCandidate = findBestRemediation(internalId, vulnerableComponent);
-            if (bestCandidate.isEmpty()) {
-                continue;
-            }
-            vulnerability.setRemediationCandidate(bestCandidate.get());
 
+        // Fetch remediations in parallel using virtual threads
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            List<java.util.concurrent.Future<Void>> futures = vulnerabilities.stream()
+                    .map(vulnerability -> executor.submit((java.util.concurrent.Callable<Void>) () -> {
+                        DependencyNode vulnerableComponent = new DependencyNode(
+                                vulnerability.getArtifactId(),
+                                vulnerability.getGroupId(),
+                                vulnerability.getVersion(),
+                                null,
+                                null
+                        );
+                        try {
+                            Optional<RemediationCandidate> bestCandidate = findBestRemediation(internalId, vulnerableComponent);
+                            bestCandidate.ifPresent(vulnerability::setRemediationCandidate);
+                        } catch (Exception ignored) {
+                            // Skip remediation if individual call fails
+                        }
+                        return null;
+                    }))
+                    .toList();
+
+            // Wait for all to complete
+            for (var future : futures) {
+                try { future.get(); } catch (Exception ignored) {}
+            }
         }
+
         return vulnerabilities;
     }
 

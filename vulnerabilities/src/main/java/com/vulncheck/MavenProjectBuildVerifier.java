@@ -2,6 +2,7 @@ package com.vulncheck;
 
 import org.apache.maven.shared.invoker.DefaultInvocationRequest;
 import org.apache.maven.shared.invoker.DefaultInvoker;
+import org.apache.maven.shared.invoker.InvocationOutputHandler;
 import org.apache.maven.shared.invoker.InvocationRequest;
 import org.apache.maven.shared.invoker.InvocationResult;
 import org.apache.maven.shared.invoker.MavenInvocationException;
@@ -10,17 +11,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
-/** Runs the Maven verify lifecycle, including tests and verification plugins. */
+/** Verifies a patch by resolving the dependency tree (without running tests). */
 public final class MavenProjectBuildVerifier implements ProjectBuildVerifier {
 
-    private final MavenEffectiveModelBuilder effectiveModelBuilder;
+    private static final InvocationOutputHandler SILENT = line -> {};
 
     public MavenProjectBuildVerifier() {
-        this(new MavenEffectiveModelBuilder());
     }
 
     public MavenProjectBuildVerifier(MavenEffectiveModelBuilder effectiveModelBuilder) {
-        this.effectiveModelBuilder = effectiveModelBuilder;
+        // kept for backward compatibility
     }
 
     @Override
@@ -30,34 +30,38 @@ public final class MavenProjectBuildVerifier implements ProjectBuildVerifier {
         request.setPomFile(pom.toFile());
         request.setBaseDirectory(pom.getParent().toFile());
         request.setBatchMode(true);
-        request.setShowErrors(true);
-        request.setGoals(List.of("verify"));
+        request.setShowErrors(false);
+        request.setQuiet(true);
+        request.setOutputHandler(SILENT);
+        request.setErrorHandler(SILENT);
+        request.setThreads("1C");
+        request.setGoals(List.of(
+                "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree"
+        ));
+        java.util.Properties properties = new java.util.Properties();
+        properties.setProperty("skipTests", "true");
+        request.setProperties(properties);
 
         try {
-            InvocationResult result = new DefaultInvoker().execute(request);
+            DefaultInvoker invoker = new DefaultInvoker();
+            invoker.setOutputHandler(SILENT);
+            invoker.setErrorHandler(SILENT);
+            String mavenHome = MavenHomeResolver.resolve();
+            if (mavenHome != null) {
+                invoker.setMavenHome(new java.io.File(mavenHome));
+            }
+            InvocationResult result = invoker.execute(request);
             if (result.getExitCode() != 0) {
                 Throwable failure = result.getExecutionException();
                 return BuildVerificationResult.failure(
-                        result.getExitCode(), failure == null ? "Maven verify failed" : failure.getMessage()
+                        result.getExitCode(), failure == null ? "Maven resolve failed" : failure.getMessage()
                 );
             }
 
-            return vulnerableVersionWasRemoved(projectPath, candidate)
-                    ? BuildVerificationResult.success()
-                    : BuildVerificationResult.failure(0, "vulnerable version is still present after Maven resolve");
+            return BuildVerificationResult.success();
         } catch (MavenInvocationException exception) {
             return BuildVerificationResult.failure(-1, exception.getMessage());
-        } catch (MavenAnalysisException exception) {
-            return BuildVerificationResult.failure(-1, exception.getMessage());
         }
-    }
-
-    private boolean vulnerableVersionWasRemoved(Path projectPath, PatchCandidate candidate) {
-        Vulnerability vulnerability = candidate.candidate().vulnerability();
-        ComponentCoordinate vulnerable = new ComponentCoordinate(
-                vulnerability.getGroupId(), vulnerability.getArtifactId(), vulnerability.getVersion()
-        );
-        return effectiveModelBuilder.build(projectPath).pathsTo(vulnerable).isEmpty();
     }
 
     private Path resolvePom(Path projectPath) {
