@@ -43,6 +43,40 @@ class MavenPatchWorkflowTest {
     }
 
     @Test
+    void changesOnlyVersionTextAndPreservesOriginalPomFormatting() throws IOException {
+        String original = String.join("\r\n", List.of(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">",
+                "\t<modelVersion>4.0.0</modelVersion>",
+                "",
+                "\t<groupId>com.example</groupId>",
+                "\t<artifactId>application</artifactId>",
+                "\t<version>9.9.9</version>",
+                "\t<dependencies>",
+                "\t\t<dependency>",
+                "\t\t\t<groupId>io.netty</groupId><artifactId>netty-handler</artifactId>",
+                "\t\t\t<version>1.0.0</version><!-- keep this comment and layout -->",
+                "\t\t</dependency>",
+                "\t</dependencies>",
+                "</project>",
+                ""
+        ));
+        Files.writeString(project.resolve("pom.xml"), original);
+
+        try (PomPatchTransaction transaction = new MavenPomPatcher().apply(
+                project, directCandidate("1.0.0", "1.1.0")
+        )) {
+            transaction.commit();
+        }
+
+        String expected = original.replace(
+                "<version>1.0.0</version><!-- keep this comment and layout -->",
+                "<version>1.1.0</version><!-- keep this comment and layout -->"
+        );
+        assertEquals(expected, Files.readString(project.resolve("pom.xml")));
+    }
+
+    @Test
     void capturesBuildBaselineBeforeMutatingPomAndAdvancesItOnlyAfterCommit() throws IOException {
         Files.writeString(project.resolve("pom.xml"), pomWithDependency("1.0.0"));
         PatchCandidate candidate = directCandidate("1.0.0", "1.1.0");

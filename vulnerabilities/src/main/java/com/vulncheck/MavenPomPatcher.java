@@ -9,13 +9,7 @@ import org.xml.sax.SAXException;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.TransformerException;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
 import java.io.IOException;
-import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -38,18 +32,27 @@ public final class MavenPomPatcher {
         Path pom = resolvePom(projectPath, patchCandidate);
         byte[] original = read(pom);
         Document document = parse(pom);
+        List<PomTextReplacement> replacements = new ArrayList<>();
         MutationPoint point = patchCandidate.mutationPoint();
         String newVersion = patchCandidate.candidate().replacement().coordinate().version();
 
         boolean changed = switch (point.type()) {
-            case UPDATE_PROPERTY -> updateProperty(document, requireOwner(point).propertyName(), newVersion);
+            case UPDATE_PROPERTY -> updateProperty(
+                    document, requireOwner(point).propertyName(), newVersion, replacements
+            );
             case UPDATE_DIRECT_DEPENDENCY, UPDATE_PARENT_DEPENDENCY ->
-                    updateDependency(document, point.component(), newVersion, DependencySection.DIRECT);
+                    updateDependency(
+                            document, point.component(), newVersion, DependencySection.DIRECT, replacements
+                    );
             case UPDATE_DEPENDENCY_MANAGEMENT ->
-                    updateDependency(document, point.component(), newVersion, DependencySection.MANAGED);
+                    updateDependency(
+                            document, point.component(), newVersion, DependencySection.MANAGED, replacements
+                    );
             case UPDATE_IMPORTED_BOM ->
-                    updateImportedBom(document, requireOwnerCoordinate(point), newVersion);
-            case UPDATE_PARENT_POM -> updateParent(document, pom, requireOwnerCoordinate(point), newVersion);
+                    updateImportedBom(document, requireOwnerCoordinate(point), newVersion, replacements);
+            case UPDATE_PARENT_POM -> updateParent(
+                    document, pom, requireOwnerCoordinate(point), newVersion, replacements
+            );
         };
 
         if (!changed) {
@@ -58,7 +61,9 @@ public final class MavenPomPatcher {
         }
 
         try {
-            writeAtomically(pom, serialize(document));
+            String originalText = new String(original, StandardCharsets.UTF_8);
+            String patchedText = new FormattingPreservingPomEditor().apply(originalText, replacements);
+            writeAtomically(pom, patchedText);
             return new PomPatchTransaction(pom, original);
         } catch (RuntimeException exception) {
             restore(pom, original);
@@ -81,47 +86,59 @@ public final class MavenPomPatcher {
         return owner.coordinate();
     }
 
-    private boolean updateProperty(Document document, String propertyName, String newVersion) {
+    private boolean updateProperty(
+            Document document,
+            String propertyName,
+            String newVersion,
+            List<PomTextReplacement> replacements
+    ) {
         if (propertyName == null || propertyName.isBlank()) {
             return false;
         }
         Element properties = child(document.getDocumentElement(), "properties");
         Element property = child(properties, propertyName);
-        return setVersion(property, newVersion);
+        return setVersion(property, newVersion, replacements);
     }
 
     private boolean updateDependency(
             Document document,
             ComponentCoordinate component,
             String newVersion,
-            DependencySection section
+            DependencySection section,
+            List<PomTextReplacement> replacements
     ) {
         Element project = document.getDocumentElement();
         Element dependencies = section == DependencySection.DIRECT
                 ? child(project, "dependencies")
                 : child(child(project, "dependencyManagement"), "dependencies");
         List<Element> matching = matchingDependencies(dependencies, component, false);
-        return setDependencyVersions(document, matching, component, newVersion);
+        return setDependencyVersions(matching, component, newVersion, replacements);
     }
 
-    private boolean updateImportedBom(Document document, ComponentCoordinate bom, String newVersion) {
+    private boolean updateImportedBom(
+            Document document,
+            ComponentCoordinate bom,
+            String newVersion,
+            List<PomTextReplacement> replacements
+    ) {
         Element dependencies = child(child(document.getDocumentElement(), "dependencyManagement"), "dependencies");
         List<Element> matching = matchingDependencies(dependencies, bom, true);
-        return setDependencyVersions(document, matching, bom, newVersion);
+        return setDependencyVersions(matching, bom, newVersion, replacements);
     }
 
     private boolean updateParent(
             Document document,
             Path childPom,
             ComponentCoordinate expectedParent,
-            String newVersion
+            String newVersion,
+            List<PomTextReplacement> replacements
     ) {
         Element parent = child(document.getDocumentElement(), "parent");
         if (!matches(parent, expectedParent)) {
             return false;
         }
         rejectLocalParentUpgrade(parent, childPom, expectedParent);
-        return setVersion(child(parent, "version"), newVersion);
+        return setVersion(child(parent, "version"), newVersion, replacements);
     }
 
     private void rejectLocalParentUpgrade(Element parent, Path childPom, ComponentCoordinate expectedParent) {
@@ -170,10 +187,10 @@ public final class MavenPomPatcher {
     }
 
     private boolean setDependencyVersions(
-            Document document,
             List<Element> dependencies,
             ComponentCoordinate expected,
-            String newVersion
+            String newVersion,
+            List<PomTextReplacement> replacements
     ) {
         if (dependencies.isEmpty()) {
             return false;
@@ -188,7 +205,7 @@ public final class MavenPomPatcher {
         }
         boolean changed = false;
         for (Element dependency : dependencies) {
-            changed |= setDependencyVersion(document, dependency, newVersion);
+            changed |= setDependencyVersion(dependency, newVersion, replacements);
         }
         return changed;
     }
@@ -204,29 +221,27 @@ public final class MavenPomPatcher {
                 && coordinate.artifactId().equals(text(element, "artifactId"));
     }
 
-    private boolean setDependencyVersion(Document document, Element dependency, String newVersion) {
+    private boolean setDependencyVersion(
+            Element dependency,
+            String newVersion,
+            List<PomTextReplacement> replacements
+    ) {
         if (dependency == null) {
             return false;
         }
         Element version = child(dependency, "version");
         if (version == null) {
-            version = document.createElementNS(dependency.getNamespaceURI(), "version");
-            dependency.insertBefore(version, firstDependencyElementAfterVersion(dependency));
+            throw new PomPatchException("Refusing to add an explicit version while applying a formatting-preserving "
+                    + "patch; Maven ownership must identify a property, dependencyManagement, BOM or parent");
         }
-        return setVersion(version, newVersion);
+        return setVersion(version, newVersion, replacements);
     }
 
-    private Node firstDependencyElementAfterVersion(Element dependency) {
-        for (String name : List.of("type", "classifier", "scope", "systemPath", "optional", "exclusions")) {
-            Element element = child(dependency, name);
-            if (element != null) {
-                return element;
-            }
-        }
-        return null;
-    }
-
-    private boolean setVersion(Element element, String newVersion) {
+    private boolean setVersion(
+            Element element,
+            String newVersion,
+            List<PomTextReplacement> replacements
+    ) {
         if (element == null || newVersion == null || newVersion.isBlank()) {
             return false;
         }
@@ -234,7 +249,7 @@ public final class MavenPomPatcher {
         if (newVersion.equals(current)) {
             return false;
         }
-        element.setTextContent(newVersion);
+        replacements.add(new PomTextReplacement(element, current, newVersion));
         return true;
     }
 
@@ -250,23 +265,6 @@ public final class MavenPomPatcher {
             return factory.newDocumentBuilder().parse(pom.toFile());
         } catch (ParserConfigurationException | SAXException | IOException exception) {
             throw new PomPatchException("Unable to parse " + pom, exception);
-        }
-    }
-
-    private String serialize(Document document) {
-        try {
-            TransformerFactory factory = TransformerFactory.newInstance();
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
-            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
-            var transformer = factory.newTransformer();
-            transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
-            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-            transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
-            StringWriter writer = new StringWriter();
-            transformer.transform(new DOMSource(document), new StreamResult(writer));
-            return writer.toString();
-        } catch (TransformerException | IllegalArgumentException exception) {
-            throw new PomPatchException("Unable to serialize patched POM", exception);
         }
     }
 
