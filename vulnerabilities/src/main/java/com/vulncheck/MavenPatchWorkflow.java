@@ -122,6 +122,10 @@ public final class MavenPatchWorkflow {
                 continue;
             }
             try (PomPatchTransaction transaction = pomPatcher.apply(projectPath, candidate)) {
+                if (transaction.mutationCount() > 1) {
+                    console.accept("  ALIGN compound patch updates " + transaction.mutationCount()
+                            + " coupled version declarations");
+                }
                 console.accept("  RUN  Maven graph, convergence and test-compile verification");
                 BuildVerificationResult verification = buildVerifier.verify(projectPath, candidate);
                 if (!verification.successful()) {

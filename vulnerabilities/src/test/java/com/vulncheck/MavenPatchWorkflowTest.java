@@ -412,6 +412,27 @@ class MavenPatchWorkflowTest {
     }
 
     @Test
+    void atomicallyUpdatesCompanionOwnedByLocalVersionProperty() throws IOException {
+        String original = pomWithPropertyAlignedLogbackDependencies();
+        Files.writeString(project.resolve("pom.xml"), original);
+        PatchCandidate corePatch = directCandidate(
+                "ch.qos.logback", "logback-core", "1.5.32", "1.5.35", "CVE-logback"
+        );
+
+        try (PomPatchTransaction transaction = new MavenPomPatcher(logbackCompanions()).apply(
+                project, corePatch
+        )) {
+            assertEquals(2, transaction.mutationCount());
+            transaction.commit();
+        }
+
+        String patched = Files.readString(project.resolve("pom.xml"));
+        assertTrue(patched.contains("<logback.version>1.5.35</logback.version>"));
+        assertTrue(patched.contains("<artifactId>logback-core</artifactId><version>1.5.35</version>"));
+        assertTrue(patched.contains("<artifactId>logback-classic</artifactId><version>${logback.version}</version>"));
+    }
+
+    @Test
     void rollsBackEveryAlignedCompanionWhenCompoundPatchFailsVerification() throws IOException {
         String original = pomWithAlignedLogbackDependencies();
         Files.writeString(project.resolve("pom.xml"), original);
@@ -680,6 +701,28 @@ class MavenPatchWorkflowTest {
                       </dependency>
                     </dependencies>
                   </dependencyManagement>
+                </project>
+                """;
+    }
+
+    private String pomWithPropertyAlignedLogbackDependencies() {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <properties><logback.version>1.5.32</logback.version></properties>
+                  <dependencies>
+                    <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-classic</artifactId><version>${logback.version}</version>
+                    </dependency>
+                    <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-core</artifactId><version>1.5.32</version>
+                    </dependency>
+                  </dependencies>
                 </project>
                 """;
     }

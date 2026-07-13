@@ -137,7 +137,7 @@ public final class MavenPomPatcher {
         List<Element> eligible = children(dependencies, "dependency").stream()
                 .filter(this::isDefaultJarDependency)
                 .filter(dependency -> component.groupId().equals(text(dependency, "groupId")))
-                .filter(dependency -> component.version().equals(text(dependency, "version")))
+                .filter(dependency -> component.version().equals(resolvedDeclaredVersion(dependency)))
                 .toList();
         Set<String> alignedArtifactIds = new LinkedHashSet<>();
         alignedArtifactIds.add(component.artifactId());
@@ -260,7 +260,7 @@ public final class MavenPomPatcher {
             return false;
         }
         boolean matchesExpectedVersion = dependencies.stream()
-                .map(dependency -> text(dependency, "version"))
+                .map(this::resolvedDeclaredVersion)
                 .allMatch(expected.version()::equals);
         if (!matchesExpectedVersion) {
             throw new PomPatchException("Stale or ambiguous dependency declaration for "
@@ -269,7 +269,7 @@ public final class MavenPomPatcher {
         }
         boolean changed = false;
         for (Element dependency : dependencies) {
-            changed |= setDependencyVersion(dependency, newVersion, replacements);
+            changed |= setVersion(declaredVersionOwner(dependency), newVersion, replacements);
         }
         return changed;
     }
@@ -285,20 +285,49 @@ public final class MavenPomPatcher {
                 && coordinate.artifactId().equals(text(element, "artifactId"));
     }
 
-    private boolean setDependencyVersion(
-            Element dependency,
-            String newVersion,
-            List<PomTextReplacement> replacements
-    ) {
+    private Element declaredVersionOwner(Element dependency) {
         if (dependency == null) {
-            return false;
+            return null;
         }
         Element version = child(dependency, "version");
         if (version == null) {
             throw new PomPatchException("Refusing to add an explicit version while applying a formatting-preserving "
                     + "patch; Maven ownership must identify a property, dependencyManagement, BOM or parent");
         }
-        return setVersion(version, newVersion, replacements);
+        String propertyName = propertyReference(version.getTextContent().trim());
+        if (propertyName == null) {
+            return version;
+        }
+        Element property = child(child(dependency.getOwnerDocument().getDocumentElement(), "properties"), propertyName);
+        if (property == null) {
+            throw new PomPatchException("Refusing to replace unresolved or inherited Maven property ${"
+                    + propertyName + "} while applying a local dependency patch");
+        }
+        return property;
+    }
+
+    private String resolvedDeclaredVersion(Element dependency) {
+        if (dependency == null) {
+            return null;
+        }
+        Element version = child(dependency, "version");
+        if (version == null) {
+            return null;
+        }
+        String declared = version.getTextContent().trim();
+        String propertyName = propertyReference(declared);
+        if (propertyName == null) {
+            return declared;
+        }
+        Element property = child(child(dependency.getOwnerDocument().getDocumentElement(), "properties"), propertyName);
+        return property == null ? null : property.getTextContent().trim();
+    }
+
+    private String propertyReference(String value) {
+        if (value != null && value.startsWith("${") && value.endsWith("}") && value.length() > 3) {
+            return value.substring(2, value.length() - 1);
+        }
+        return null;
     }
 
     private boolean setVersion(
@@ -312,6 +341,14 @@ public final class MavenPomPatcher {
         String current = element.getTextContent().trim();
         if (newVersion.equals(current)) {
             return false;
+        }
+        for (PomTextReplacement replacement : replacements) {
+            if (replacement.element() == element) {
+                if (!newVersion.equals(replacement.replacementText())) {
+                    throw new PomPatchException("Conflicting versions resolved to the same Maven property");
+                }
+                return false;
+            }
         }
         replacements.add(new PomTextReplacement(element, current, newVersion));
         return true;

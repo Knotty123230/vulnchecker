@@ -179,7 +179,7 @@ public class VulnScanner implements Runnable {
             System.out.printf("Found %d actionable patch candidate(s).%n", candidates.size());
             MavenPatchWorkflow patchWorkflow = new MavenPatchWorkflow(
                     new MavenPomPatcher(configuration.nexusRepository() != null
-                            ? new PomDependencyFetcher(configuration.nexusRepository()) : null),
+                            ? new PomDependencyFetcher(configuration.nexusRepository(), System.out::println) : null),
                     new MavenProjectBuildVerifier(configuration.nexusRepository()),
                     new SonatypePatchSecurityVerifier(
                             projectId, dependencyNodeFinder, sonatypeVulnerabilitiesScanner, vulnerabilities
