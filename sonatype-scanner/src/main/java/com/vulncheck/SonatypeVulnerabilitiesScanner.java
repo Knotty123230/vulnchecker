@@ -8,6 +8,7 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
 
     public static final String PKG_MANAGER = "maven";
     private final SonatypeClient sonatypeClient;
+    private final RemediationCache cache = new RemediationCache();
     private static final List<String> REMEDIATION_PRIORITY = List.of(
             "recommended-non-breaking-with-dependencies",
             "recommended-non-breaking",
@@ -85,10 +86,15 @@ public class SonatypeVulnerabilitiesScanner implements VulnerabilitiesScanner {
             String applicationId,
             DependencyNode dependency
     ) {
-        JsonNode response = sonatypeClient.getRemediation(
-                applicationId,
-                dependency
-        );
+        // Check disk cache first
+        Optional<JsonNode> cached = cache.get(dependency.groupId(), dependency.artifactId(), dependency.version());
+        JsonNode response;
+        if (cached.isPresent()) {
+            response = cached.get();
+        } else {
+            response = sonatypeClient.getRemediation(applicationId, dependency);
+            cache.put(dependency.groupId(), dependency.artifactId(), dependency.version(), response);
+        }
 
         List<RemediationCandidate> candidates =
                 toRemediationCandidates(response);
