@@ -17,8 +17,7 @@ class RepositoryCandidateGeneratorTest {
                 List.of("2.0.0", "1.2.0", "1.3.0-RC1", "1.2.1", "1.1.9", "1.5.0", "2.0.0-SNAPSHOT")
         );
 
-        // Only same-major versions pass (no 2.0.0 major bump)
-        assertEquals(List.of("1.2.1", "1.5.0"), selected);
+        assertEquals(List.of("1.2.1", "1.5.0", "2.0.0"), selected);
     }
 
     @Test

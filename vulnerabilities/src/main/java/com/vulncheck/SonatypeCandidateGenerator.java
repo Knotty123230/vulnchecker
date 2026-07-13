@@ -20,12 +20,9 @@ public final class SonatypeCandidateGenerator implements CandidateGenerator {
             return List.of();
         }
 
-        // Block breaking changes: check version compatibility
         String currentVersion = mutationPoint.component().version();
         String newVersion = replacement.version();
-        if (!isCompatibleUpgrade(currentVersion, newVersion)) {
-            return List.of();
-        }
+        int priority = isCompatibleUpgrade(currentVersion, newVersion) ? 0 : 50;
 
         FixCandidate candidate = new FixCandidate(
                 vulnerability,
@@ -34,7 +31,7 @@ public final class SonatypeCandidateGenerator implements CandidateGenerator {
                 mutationPoint.type() == MutationType.UPDATE_DIRECT_DEPENDENCY,
                 sonatypeParentFixes(remediation)
         );
-        return List.of(new PatchCandidate(mutationPoint, candidate));
+        return List.of(new PatchCandidate(mutationPoint, candidate, priority));
     }
 
     /**

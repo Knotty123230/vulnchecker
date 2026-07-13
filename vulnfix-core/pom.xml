@@ -12,18 +12,10 @@
     </parent>
 
     <artifactId>vulnfix-core</artifactId>
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <source>25</source>
-                    <target>25</target>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-
-
+    <dependencies>
+        <dependency>
+            <groupId>guru.nidi</groupId>
+            <artifactId>graphviz-java</artifactId>
+        </dependency>
+    </dependencies>
 </project>

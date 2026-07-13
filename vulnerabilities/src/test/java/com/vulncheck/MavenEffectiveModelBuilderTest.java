@@ -37,12 +37,10 @@ class MavenEffectiveModelBuilderTest {
                 .filter(binding -> binding.component().artifactId().equals("netty-handler"))
                 .findFirst()
                 .orElseThrow();
-        assertEquals(3, nettyBinding.owners().size());
-        assertEquals(2, nettyBinding.owners().stream()
+        assertEquals(1, nettyBinding.owners().size());
+        assertEquals(1, nettyBinding.owners().stream()
                 .filter(owner -> owner.type() == VersionOwnerType.IMPORTED_BOM)
                 .count());
-        assertTrue(nettyBinding.owners().stream()
-                .anyMatch(owner -> owner.type() == VersionOwnerType.PARENT_POM));
         VersionOwnerBinding codecBinding = model.versionOwners().stream()
                 .filter(binding -> binding.component().artifactId().equals("netty-codec-http"))
                 .findFirst()
@@ -120,6 +118,7 @@ class MavenEffectiveModelBuilderTest {
                     <dependencies>
                       <dependency>
                         <groupId>io.netty</groupId>
+                        <!-- org.springframework.boot:spring-boot-dependencies:3.3.0, line 99 -->
                         <artifactId>netty-handler</artifactId>
                         <version>4.1.100.Final</version>
                       </dependency>

@@ -12,7 +12,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -30,13 +29,9 @@ import java.util.concurrent.ConcurrentMap;
 public final class PomDependencyFetcher {
 
     public record PomDependency(String groupId, String artifactId, String version) {
-        public boolean isVersionProperty() {
-            return version != null && version.startsWith("${");
-        }
-        public boolean isSameVersionAsParent() {
+        public boolean isProjectVersion() {
             return "${project.version}".equals(version)
-                    || "${version}".equals(version)
-                    || "${project.parent.version}".equals(version);
+                    || "${version}".equals(version);
         }
     }
 
@@ -48,7 +43,7 @@ public final class PomDependencyFetcher {
     public PomDependencyFetcher(NexusRepositoryConfiguration config) {
         this.config = config;
         this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
+                .connectTimeout(config.requestTimeout())
                 .build();
         this.domFactory = DocumentBuilderFactory.newInstance();
         try {
@@ -71,8 +66,8 @@ public final class PomDependencyFetcher {
 
     /**
      * Discovers companions for a given artifact by:
-     * 1. Checking its POM for same-group dependencies with inherited version
-     * 2. Checking its parent POM for <modules> (all modules are companions)
+     * Checks only explicit same-group dependencies tied to ${project.version}.
+     * Parent modules are paths rather than artifact IDs and are deliberately not guessed.
      */
     public List<String> findCompanionArtifactIds(String groupId, String artifactId, String version) {
         Set<String> companions = new LinkedHashSet<>();
@@ -81,80 +76,14 @@ public final class PomDependencyFetcher {
         List<PomDependency> deps = fetchDependencies(groupId, artifactId, version);
         for (PomDependency dep : deps) {
             if (dep.groupId().equals(groupId)) {
-                if (dep.isSameVersionAsParent() || dep.version() == null) {
+                if (dep.isProjectVersion()) {
                     companions.add(dep.artifactId());
                 }
             }
         }
 
-        // 2. Check parent POM for <modules> (multi-module project siblings)
-        String parentArtifactId = findParentArtifactId(groupId, artifactId, version);
-        if (parentArtifactId != null) {
-            List<String> modules = fetchModules(groupId, parentArtifactId, version);
-            companions.addAll(modules);
-        }
-
         companions.remove(artifactId); // don't include self
         return List.copyOf(companions);
-    }
-
-    /**
-     * Fetches the parent artifactId from an artifact's POM.
-     */
-    private String findParentArtifactId(String groupId, String artifactId, String version) {
-        String pomUrl = buildPomUrl(groupId, artifactId, version);
-        try {
-            HttpRequest.Builder request = HttpRequest.newBuilder()
-                    .uri(URI.create(pomUrl))
-                    .timeout(Duration.ofSeconds(10))
-                    .GET();
-            addAuth(request);
-            HttpResponse<byte[]> response = httpClient.send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
-            if (response.statusCode() != 200) return null;
-
-            Document doc = domFactory.newDocumentBuilder()
-                    .parse(new ByteArrayInputStream(response.body()));
-            NodeList parents = doc.getElementsByTagName("parent");
-            if (parents.getLength() == 0) return null;
-            Element parent = (Element) parents.item(0);
-            String parentGroup = text(parent, "groupId");
-            String parentArtifact = text(parent, "artifactId");
-            // Only consider parent in same group
-            if (groupId.equals(parentGroup) && parentArtifact != null) {
-                return parentArtifact;
-            }
-            return null;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /**
-     * Fetches <modules> from a POM.
-     */
-    private List<String> fetchModules(String groupId, String artifactId, String version) {
-        String pomUrl = buildPomUrl(groupId, artifactId, version);
-        try {
-            HttpRequest.Builder request = HttpRequest.newBuilder()
-                    .uri(URI.create(pomUrl))
-                    .timeout(Duration.ofSeconds(10))
-                    .GET();
-            addAuth(request);
-            HttpResponse<byte[]> response = httpClient.send(request.build(), HttpResponse.BodyHandlers.ofByteArray());
-            if (response.statusCode() != 200) return List.of();
-
-            Document doc = domFactory.newDocumentBuilder()
-                    .parse(new ByteArrayInputStream(response.body()));
-            NodeList modules = doc.getElementsByTagName("module");
-            List<String> result = new ArrayList<>();
-            for (int i = 0; i < modules.getLength(); i++) {
-                String moduleName = modules.item(i).getTextContent().trim();
-                if (!moduleName.isEmpty()) result.add(moduleName);
-            }
-            return result;
-        } catch (Exception e) {
-            return List.of();
-        }
     }
 
     private void addAuth(HttpRequest.Builder request) {
@@ -172,7 +101,7 @@ public final class PomDependencyFetcher {
         try {
             HttpRequest.Builder request = HttpRequest.newBuilder()
                     .uri(URI.create(pomUrl))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(config.requestTimeout())
                     .GET();
             addAuth(request);
 

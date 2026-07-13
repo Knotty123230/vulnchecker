@@ -150,6 +150,10 @@ public class VulnScanner implements Runnable {
             }
 
             DependencyNode dependencyNode = dependencyNodeFinder.find(path);
+            if (dependencyNode == null) {
+                System.err.println("Unable to resolve the Maven dependency graph; no changes were made.");
+                return;
+            }
             DependencyGraph graph = graphGenerator.generateGraph(dependencyNode);
             //TODO: here maven project, but can be gradle or other, then add other package managers
             VulnerabilitiesScanner sonatypeVulnerabilitiesScanner = new SonatypeVulnerabilitiesScanner(configuration.credentials());
@@ -166,35 +170,25 @@ public class VulnScanner implements Runnable {
                             System.out::println
                     );
             if (configuration.nexusRepository() == null) {
-                System.out.println("Nexus is not configured; repository version fallback is disabled.");
+                System.out.printf("Nexus is not configured; repository version fallback is disabled.%n");
             }
             List<PatchCandidate> candidates = new VulnerabilitiesFixer(vulnerabilities, graph, path, versionRepository)
                     .findPatchCandidates();
 
-            // If no candidates but fixable vulns exist, try property-based BOM upgrade
-            if (candidates.isEmpty() && vulnerabilities.stream().anyMatch(v -> v.getRemediationCandidate() != null)) {
-                int bomPatches = tryPropertyBomUpgrade(path, versionRepository);
-                if (bomPatches > 0) {
-                    // Re-scan after BOM bump
-                    dependencyNode = dependencyNodeFinder.find(path);
-                    graph = graphGenerator.generateGraph(dependencyNode);
-                    vulnerabilities = sonatypeVulnerabilitiesScanner.scanDependencies(projectId, dependencyNode);
-                    candidates = new VulnerabilitiesFixer(vulnerabilities, graph, path, versionRepository)
-                            .findPatchCandidates();
-                }
-            }
-
             System.out.println();
-            System.out.println("Found %d actionable patch candidate(s).".formatted(candidates.size()));
+            System.out.printf("Found %d actionable patch candidate(s).%n", candidates.size());
             MavenPatchWorkflow patchWorkflow = new MavenPatchWorkflow(
                     new MavenPomPatcher(configuration.nexusRepository() != null
                             ? new PomDependencyFetcher(configuration.nexusRepository()) : null),
-                    new MavenProjectBuildVerifier(),
+                    new MavenProjectBuildVerifier(configuration.nexusRepository()),
+                    new SonatypePatchSecurityVerifier(
+                            projectId, dependencyNodeFinder, sonatypeVulnerabilitiesScanner, vulnerabilities
+                    ),
                     System.out::println
             );
             List<AppliedPatch> applied = patchWorkflow.applyRecommendedPatches(path, candidates);
             System.out.println();
-            System.out.println("Applied %d verified patch(es).".formatted(applied.size()));
+            System.out.printf("Applied %d verified patch(es).%n", applied.size());
 
             // Re-scan loop: keep fixing until all resolved or nothing more can be fixed
             int iteration = 1;
@@ -225,15 +219,7 @@ public class VulnScanner implements Runnable {
                         .findPatchCandidates();
 
                 if (candidates.isEmpty()) {
-                    // Try BOM property upgrade again
-                    int bomPatches = tryPropertyBomUpgrade(path, versionRepository);
-                    if (bomPatches > 0) {
-                        totalApplied += bomPatches;
-                        continue; // re-loop to re-scan after BOM bump
-                    }
-                    System.out.println("No more patch candidates via parent upgrade. Trying direct overrides...");
-                    int overrides = applyDirectOverrides(path, vulnerabilities);
-                    totalApplied += overrides;
+                    System.out.println("No more semantically attributable patch candidates; manual review is required.");
                     break;
                 }
 
@@ -241,9 +227,7 @@ public class VulnScanner implements Runnable {
                 totalApplied += applied.size();
 
                 if (applied.isEmpty()) {
-                    System.out.println("No patches could be applied via parent upgrade. Trying direct overrides...");
-                    int overrides = applyDirectOverrides(path, vulnerabilities);
-                    totalApplied += overrides;
+                    System.out.println("No verified patches could be applied; unsafe direct overrides were not written.");
                     break;
                 }
 
@@ -267,7 +251,7 @@ public class VulnScanner implements Runnable {
 
             if (svgPath != null) {
                 Path outputPath = graph.exportSvg(svgPath.normalize());
-                System.out.println("Dependency graph exported to %s".formatted(outputPath));
+                System.out.printf("Dependency graph exported to %s%n", outputPath);
             }
         }
 
@@ -483,192 +467,6 @@ public class VulnScanner implements Runnable {
             }
             int dot = version.indexOf('.');
             return dot > 0 ? version.substring(0, dot) : version;
-        }
-
-        /**
-         * Detects BOM dependencies with property-based versions (e.g., ${quarkus.platform.version})
-         * and upgrades the property to the latest available version from Nexus.
-         * Handles Quarkus, Micronaut, and similar BOM-centric frameworks.
-         */
-        private int tryPropertyBomUpgrade(Path projectPath, ComponentVersionRepository versionRepository) {
-            String BOLD = "\033[1m";
-            String GREEN = "\033[0;32m";
-            String RESET = "\033[0m";
-
-            Path pom = projectPath.toAbsolutePath().normalize();
-            if (java.nio.file.Files.isDirectory(pom)) pom = pom.resolve("pom.xml");
-
-            try {
-                String content = java.nio.file.Files.readString(pom, java.nio.charset.StandardCharsets.UTF_8);
-
-                // Find properties
-                java.util.Map<String, String> properties = new java.util.LinkedHashMap<>();
-                java.util.regex.Matcher propMatcher = java.util.regex.Pattern.compile(
-                        "<properties>(.*?)</properties>", java.util.regex.Pattern.DOTALL
-                ).matcher(content);
-                if (propMatcher.find()) {
-                    java.util.regex.Matcher tagMatcher = java.util.regex.Pattern.compile(
-                            "<([^/][^>]+)>([^<]+)</\\1>"
-                    ).matcher(propMatcher.group(1));
-                    while (tagMatcher.find()) {
-                        properties.put(tagMatcher.group(1), tagMatcher.group(2).trim());
-                    }
-                }
-
-                // Find BOM dependencies with property-based versions
-                java.util.regex.Pattern bomPattern = java.util.regex.Pattern.compile(
-                        "<dependency>(.*?)</dependency>", java.util.regex.Pattern.DOTALL
-                );
-                java.util.regex.Matcher bomMatcher = bomPattern.matcher(content);
-
-                int applied = 0;
-                while (bomMatcher.find()) {
-                    String block = bomMatcher.group(1);
-                    if (!block.contains("<scope>import</scope>") || !block.contains("<type>pom</type>")) continue;
-
-                    // Extract groupId, artifactId, version (may be property refs)
-                    String groupId = extractTagValue(block, "groupId");
-                    String artifactId = extractTagValue(block, "artifactId");
-                    String versionRef = extractTagValue(block, "version");
-
-                    if (groupId == null || artifactId == null || versionRef == null) continue;
-                    if (!versionRef.startsWith("${")) continue; // only property-based
-
-                    // Resolve property
-                    String propertyName = versionRef.substring(2, versionRef.length() - 1);
-                    String currentVersion = properties.get(propertyName);
-                    if (currentVersion == null) continue;
-
-                    // Resolve groupId/artifactId if they're also properties
-                    if (groupId.startsWith("${")) {
-                        String gProp = groupId.substring(2, groupId.length() - 1);
-                        groupId = properties.getOrDefault(gProp, groupId);
-                    }
-                    if (artifactId.startsWith("${")) {
-                        String aProp = artifactId.substring(2, artifactId.length() - 1);
-                        artifactId = properties.getOrDefault(aProp, artifactId);
-                    }
-
-                    // Find newer versions from Nexus
-                    ComponentCoordinate bomCoord = new ComponentCoordinate(groupId, artifactId, currentVersion);
-                    java.util.List<String> available = versionRepository.findVersions(bomCoord);
-                    java.util.List<String> newer = new StableMavenVersionPolicy(5)
-                            .selectNewerVersions(currentVersion, available);
-
-                    if (newer.isEmpty()) continue;
-
-                    // Take the latest safe version
-                    String newVersion = newer.getLast();
-
-                    System.out.println();
-                    System.out.printf("  %sBOM UPGRADE%s %s:%s via property '%s': %s → %s%s%s%n",
-                            BOLD, RESET, groupId, artifactId, propertyName, currentVersion, GREEN, newVersion, RESET);
-
-                    // Patch the property
-                    String patched = content.replaceFirst(
-                            "(<%s>)%s(</%s>)".formatted(
-                                    java.util.regex.Pattern.quote(propertyName),
-                                    java.util.regex.Pattern.quote(currentVersion),
-                                    java.util.regex.Pattern.quote(propertyName)),
-                            "$1" + java.util.regex.Matcher.quoteReplacement(newVersion) + "$2"
-                    );
-
-                    if (!patched.equals(content)) {
-                        content = patched;
-                        applied++;
-                    }
-                }
-
-                if (applied > 0) {
-                    java.nio.file.Files.writeString(pom, content, java.nio.charset.StandardCharsets.UTF_8);
-                    System.out.println("  Applied %d BOM property upgrade(s).".formatted(applied));
-                }
-                return applied;
-            } catch (Exception e) {
-                System.out.println("  ERROR: " + e.getMessage());
-                return 0;
-            }
-        }
-
-        private String extractTagValue(String block, String tag) {
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                    "<" + tag + ">\\s*([^<]+)\\s*</" + tag + ">"
-            ).matcher(block);
-            return m.find() ? m.group(1).trim() : null;
-        }
-
-        /**
-         * Fallback: directly insert version overrides in dependencyManagement
-         * for vulnerabilities that have a fix but couldn't be resolved by upgrading parents.
-         */
-        private int applyDirectOverrides(Path projectPath, List<Vulnerability> vulnerabilities) {
-            Path pom = projectPath.toAbsolutePath().normalize();
-            if (java.nio.file.Files.isDirectory(pom)) {
-                pom = pom.resolve("pom.xml");
-            }
-
-            List<Vulnerability> fixable = vulnerabilities.stream()
-                    .filter(v -> v.getRemediationCandidate() != null && v.getRemediationCandidate().target() != null)
-                    .toList();
-
-            if (fixable.isEmpty()) return 0;
-
-            try {
-                String content = java.nio.file.Files.readString(pom, java.nio.charset.StandardCharsets.UTF_8);
-                int applied = 0;
-
-                for (Vulnerability v : fixable) {
-                    ComponentCoordinate target = v.getRemediationCandidate().target();
-                    String groupId = v.getGroupId();
-                    String artifactId = v.getArtifactId();
-                    String currentVersion = v.getVersion();
-                    String newVersion = target.version();
-
-                    // Block breaking changes — same check as StableMavenVersionPolicy
-                    if (!isCompatibleVersion(currentVersion, newVersion)) {
-                        System.out.println("  SKIP %s:%s %s → %s (breaking change, manual review required)".formatted(
-                                groupId, artifactId, currentVersion, newVersion));
-                        continue;
-                    }
-
-                    // Check if already in dependencyManagement
-                    String gId = java.util.regex.Pattern.quote(groupId);
-                    String aId = java.util.regex.Pattern.quote(artifactId);
-                    if (content.matches("(?s).*<dependency>.*<groupId>\\s*" + gId + "\\s*</groupId>.*<artifactId>\\s*" + aId + "\\s*</artifactId>.*</dependency>.*")) {
-                        continue; // already declared, skip
-                    }
-
-                    // Find insertion point: before </dependencies> in <dependencyManagement>
-                    java.util.regex.Pattern dmPattern = java.util.regex.Pattern.compile(
-                            "(<dependencyManagement>\\s*<dependencies>)(.*?)(</dependencies>\\s*</dependencyManagement>)",
-                            java.util.regex.Pattern.DOTALL
-                    );
-                    java.util.regex.Matcher matcher = dmPattern.matcher(content);
-                    if (!matcher.find()) continue;
-
-                    String indent = "            ";
-                    String newDep = "\n" + indent + "<dependency>\n"
-                            + indent + "    <groupId>" + groupId + "</groupId>\n"
-                            + indent + "    <artifactId>" + artifactId + "</artifactId>\n"
-                            + indent + "    <version>" + newVersion + "</version>\n"
-                            + indent + "</dependency>";
-
-                    int insertPos = matcher.start(3);
-                    content = content.substring(0, insertPos) + newDep + "\n" + indent + content.substring(insertPos);
-                    applied++;
-                    System.out.println("  OVERRIDE %s:%s → %s (inserted into dependencyManagement)".formatted(
-                            groupId, artifactId, newVersion));
-                }
-
-                if (applied > 0) {
-                    java.nio.file.Files.writeString(pom, content, java.nio.charset.StandardCharsets.UTF_8);
-                    System.out.println("Applied %d direct override(s).".formatted(applied));
-                }
-                return applied;
-            } catch (java.io.IOException e) {
-                System.out.println("  ERROR: " + e.getMessage());
-                return 0;
-            }
         }
 
         private void printVersionConsistency(Path projectPath, NexusRepositoryConfiguration nexus) {

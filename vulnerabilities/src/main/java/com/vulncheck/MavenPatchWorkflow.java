@@ -2,15 +2,14 @@ package com.vulncheck;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Consumer;
 
-/** Tries candidates transactionally and keeps only patches that pass Maven verify. */
+/** Tries alternatives per vulnerability and commits only the first fully verified mutation. */
 public final class MavenPatchWorkflow {
 
     private final MavenPomPatcher pomPatcher;
@@ -19,12 +18,7 @@ public final class MavenPatchWorkflow {
     private final Consumer<String> console;
 
     public MavenPatchWorkflow() {
-        this(
-                new MavenPomPatcher(),
-                new MavenProjectBuildVerifier(),
-                PatchSecurityVerifier.accepting(),
-                System.out::println
-        );
+        this(new MavenPomPatcher(), new MavenProjectBuildVerifier(), PatchSecurityVerifier.unconfigured(), System.out::println);
     }
 
     public MavenPatchWorkflow(
@@ -32,7 +26,7 @@ public final class MavenPatchWorkflow {
             ProjectBuildVerifier buildVerifier,
             Consumer<String> console
     ) {
-        this(pomPatcher, buildVerifier, PatchSecurityVerifier.accepting(), console);
+        this(pomPatcher, buildVerifier, PatchSecurityVerifier.unconfigured(), console);
     }
 
     public MavenPatchWorkflow(
@@ -48,117 +42,26 @@ public final class MavenPatchWorkflow {
     }
 
     public List<AppliedPatch> applyRecommendedPatches(Path projectPath, List<PatchCandidate> candidates) {
-        // Group candidates by mutation point key (type + component + target version)
-        // so that multiple CVEs fixed by the same change are tried only once.
-        Map<String, List<PatchCandidate>> byMutationAction = new LinkedHashMap<>();
-        candidates.forEach(candidate -> byMutationAction
-                .computeIfAbsent(mutationActionKey(candidate), ignored -> new ArrayList<>())
+        Map<String, List<PatchCandidate>> alternativesByVulnerability = new LinkedHashMap<>();
+        candidates.forEach(candidate -> alternativesByVulnerability
+                .computeIfAbsent(vulnerabilityKey(candidate.candidate().vulnerability()), ignored -> new ArrayList<>())
                 .add(candidate));
 
-        // Cache of already-tried mutation actions: key → success/fail
-        Set<String> failedActions = new HashSet<>();
-        Set<String> succeededActions = new HashSet<>();
+        Map<String, ActionStatus> actionCache = new HashMap<>();
         List<AppliedPatch> applied = new ArrayList<>();
-
-        for (var entry : byMutationAction.entrySet()) {
-            String actionKey = entry.getKey();
-            List<PatchCandidate> group = entry.getValue();
-
-            // Skip if this exact action already failed
-            if (failedActions.contains(actionKey)) {
-                group.forEach(c -> console.accept("  CACHE-SKIP " + actionKey + " (previously failed)"));
-                continue;
-            }
-
-            // If already succeeded (committed), mark all CVEs in this group as fixed
-            if (succeededActions.contains(actionKey)) {
-                group.forEach(c -> console.accept("  CACHE-HIT " + actionKey + " (already applied)"));
-                continue;
-            }
-
-            // Try the action once for the whole group
-            boolean success = tryMutationAction(projectPath, group, applied);
-            if (success) {
-                succeededActions.add(actionKey);
-            } else {
-                failedActions.add(actionKey);
-            }
-        }
-
-        // Now handle remaining vulnerabilities that weren't in a group
-        // Re-group by vulnerability for any that had multiple mutation options
-        Map<String, List<PatchCandidate>> byVulnerability = new LinkedHashMap<>();
-        candidates.forEach(candidate -> {
-            String actionKey = mutationActionKey(candidate);
-            // Only process candidates whose action wasn't already resolved
-            if (!succeededActions.contains(actionKey) && !failedActions.contains(actionKey)) {
-                byVulnerability
-                        .computeIfAbsent(vulnerabilityKey(candidate.candidate().vulnerability()), ignored -> new ArrayList<>())
-                        .add(candidate);
-            }
-        });
-
-        byVulnerability.forEach((ignored, alternatives) -> tryAlternatives(projectPath, alternatives, applied, failedActions));
+        alternativesByVulnerability.forEach((ignored, alternatives) ->
+                tryAlternatives(projectPath, alternatives, applied, actionCache));
 
         console.accept("");
         console.accept("Applied " + applied.size() + " verified patch(es).");
         return List.copyOf(applied);
     }
 
-    private boolean tryMutationAction(
-            Path projectPath,
-            List<PatchCandidate> group,
-            List<AppliedPatch> applied
-    ) {
-        // Use the first candidate as representative — they all share the same mutation
-        PatchCandidate representative = group.getFirst();
-        Vulnerability vulnerability = representative.candidate().vulnerability();
-        ComponentCoordinate current = representative.mutationPoint().component();
-        ComponentCoordinate replacement = representative.candidate().replacement().coordinate();
-        String source = representative.recommendationPriority() < 100 ? "SONATYPE" : "REPOSITORY";
-
-        // Print affected CVEs
-        console.accept("");
-        console.accept("[PATCH] " + representative.mutationPoint().type() + " "
-                + coordinates(current) + " -> " + replacement.version()
-                + " (fixes " + group.size() + " CVE(s))");
-        group.forEach(c -> console.accept("        " + c.candidate().vulnerability().getId()
-                + " " + c.candidate().vulnerability().component()));
-
-        console.accept("  TRY  [" + source + "] " + representative.mutationPoint().type() + " "
-                + coordinates(current) + " -> " + replacement.version());
-
-        try (PomPatchTransaction transaction = pomPatcher.apply(projectPath, representative)) {
-            console.accept("  RUN  mvn dependency:tree (resolve only)");
-            BuildVerificationResult verification = buildVerifier.verify(projectPath, representative);
-            if (verification.successful()) {
-                console.accept("  SCAN Sonatype verification");
-                SecurityVerificationResult security = securityVerifier.verify(projectPath, representative);
-                if (security.safe()) {
-                    transaction.commit();
-                    applied.add(new AppliedPatch(representative, verification));
-                    console.accept("  OK   patch committed — " + group.size() + " CVE(s) fixed");
-                    return true;
-                }
-                console.accept("  UNSAFE " + security.failure());
-                console.accept("  UNDO pom.xml restored");
-                return false;
-            }
-            console.accept("  FAIL Maven exit=" + verification.exitCode()
-                    + messageSuffix(verification.failure()));
-            console.accept("  UNDO pom.xml restored");
-            return false;
-        } catch (RuntimeException exception) {
-            console.accept("  SKIP " + exception.getMessage());
-            return false;
-        }
-    }
-
     private void tryAlternatives(
             Path projectPath,
             List<PatchCandidate> alternatives,
             List<AppliedPatch> applied,
-            Set<String> failedActions
+            Map<String, ActionStatus> actionCache
     ) {
         Vulnerability vulnerability = alternatives.getFirst().candidate().vulnerability();
         console.accept("");
@@ -166,41 +69,46 @@ public final class MavenPatchWorkflow {
 
         for (PatchCandidate candidate : alternatives) {
             String actionKey = mutationActionKey(candidate);
-
-            // Skip if cached as failed
-            if (failedActions.contains(actionKey)) {
-                console.accept("  CACHE-SKIP " + candidate.mutationPoint().type() + " "
-                        + coordinates(candidate.mutationPoint().component()) + " -> "
-                        + candidate.candidate().replacement().coordinate().version() + " (previously failed)");
+            ActionStatus cached = actionCache.get(actionKey);
+            if (cached == ActionStatus.BUILD_FAILED) {
+                console.accept("  CACHE-SKIP " + describe(candidate) + " (Maven verification previously failed)");
+                continue;
+            }
+            if (cached == ActionStatus.COMMITTED) {
+                SecurityVerificationResult security = securityVerifier.verify(projectPath, candidate);
+                if (security.safe()) {
+                    console.accept("  CACHE-HIT " + describe(candidate) + " (already applied and CVE verified)");
+                    return;
+                }
+                console.accept("  CACHE-MISS " + describe(candidate) + messageSuffix(security.failure()));
                 continue;
             }
 
-            ComponentCoordinate current = candidate.mutationPoint().component();
-            ComponentCoordinate replacement = candidate.candidate().replacement().coordinate();
-            String source = candidate.recommendationPriority() < 100 ? "SONATYPE" : "REPOSITORY";
-            console.accept("  TRY  [" + source + "] " + candidate.mutationPoint().type() + " "
-                    + coordinates(current) + " -> " + replacement.version());
-
+            console.accept("  TRY  " + describe(candidate));
             try (PomPatchTransaction transaction = pomPatcher.apply(projectPath, candidate)) {
-                console.accept("  RUN  mvn dependency:tree (resolve only)");
+                console.accept("  RUN  Maven graph, convergence and test-compile verification");
                 BuildVerificationResult verification = buildVerifier.verify(projectPath, candidate);
-                if (verification.successful()) {
-                    console.accept("  SCAN Sonatype verification");
-                    SecurityVerificationResult security = securityVerifier.verify(projectPath, candidate);
-                    if (security.safe()) {
-                        transaction.commit();
-                        applied.add(new AppliedPatch(candidate, verification));
-                        console.accept("  OK   patch committed");
-                        return;
-                    }
-                    console.accept("  UNSAFE " + security.failure());
-                    console.accept("  UNDO pom.xml restored");
+                if (!verification.successful()) {
+                    actionCache.put(actionKey, ActionStatus.BUILD_FAILED);
+                    console.accept("  FAIL Maven exit=" + verification.exitCode()
+                            + messageSuffix(verification.failure()));
+                    console.accept("  UNDO POM restored");
                     continue;
                 }
-                console.accept("  FAIL Maven exit=" + verification.exitCode()
-                        + messageSuffix(verification.failure()));
-                console.accept("  UNDO pom.xml restored");
-                failedActions.add(actionKey);
+
+                console.accept("  SCAN Sonatype verification");
+                SecurityVerificationResult security = securityVerifier.verify(projectPath, candidate);
+                if (!security.safe()) {
+                    console.accept("  UNSAFE " + security.failure());
+                    console.accept("  UNDO POM restored");
+                    continue;
+                }
+
+                transaction.commit();
+                actionCache.put(actionKey, ActionStatus.COMMITTED);
+                applied.add(new AppliedPatch(candidate, verification));
+                console.accept("  OK   patch committed");
+                return;
             } catch (RuntimeException exception) {
                 console.accept("  SKIP " + exception.getMessage());
             }
@@ -209,16 +117,26 @@ public final class MavenPatchWorkflow {
         console.accept("  NONE no candidate passed verification");
     }
 
-    /**
-     * Key that uniquely identifies a mutation action (type + what component + to what version).
-     * If two CVEs produce the same action, it only needs to be tried once.
-     */
+    private String describe(PatchCandidate candidate) {
+        ComponentCoordinate current = candidate.mutationPoint().component();
+        ComponentCoordinate replacement = candidate.candidate().replacement().coordinate();
+        String source = candidate.recommendationPriority() < 100 ? "SONATYPE" : "REPOSITORY";
+        return "[" + source + "] " + candidate.mutationPoint().type() + " "
+                + coordinates(current) + " -> " + replacement.version();
+    }
+
     private String mutationActionKey(PatchCandidate candidate) {
         MutationPoint point = candidate.mutationPoint();
+        ComponentCoordinate component = point.component();
         ComponentCoordinate replacement = candidate.candidate().replacement().coordinate();
-        return point.type() + "|"
-                + point.component().groupId() + ":" + point.component().artifactId() + ":" + point.component().version()
-                + "|" + replacement.version();
+        VersionOwner owner = point.owner();
+        String ownerPath = owner == null || owner.pomPath() == null
+                ? "<project-pom>"
+                : owner.pomPath().toAbsolutePath().normalize().toString();
+        String ownerProperty = owner == null ? null : owner.propertyName();
+        String ownerCoordinate = owner == null ? null : coordinates(owner.coordinate());
+        return point.type() + "|" + ownerPath + "|" + ownerProperty + "|" + ownerCoordinate
+                + "|" + coordinates(component) + "|" + coordinates(replacement);
     }
 
     private String vulnerabilityKey(Vulnerability vulnerability) {
@@ -227,10 +145,18 @@ public final class MavenPatchWorkflow {
     }
 
     private String coordinates(ComponentCoordinate coordinate) {
+        if (coordinate == null) {
+            return "<unknown>";
+        }
         return coordinate.groupId() + ":" + coordinate.artifactId() + ":" + coordinate.version();
     }
 
     private String messageSuffix(String message) {
         return message == null || message.isBlank() ? "" : " (" + message + ")";
+    }
+
+    private enum ActionStatus {
+        COMMITTED,
+        BUILD_FAILED
     }
 }

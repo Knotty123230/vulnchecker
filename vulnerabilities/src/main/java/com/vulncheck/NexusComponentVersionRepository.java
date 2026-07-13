@@ -17,6 +17,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Nexus Repository 3 adapter backed by the Components Search REST API. */
 public final class NexusComponentVersionRepository implements ComponentVersionRepository {
@@ -25,6 +26,7 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final ConcurrentMap<String, List<String>> cache = new ConcurrentHashMap<>();
+    private final AtomicBoolean repositoryValidated = new AtomicBoolean();
 
     public NexusComponentVersionRepository(NexusRepositoryConfiguration configuration) {
         this(
@@ -46,6 +48,7 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
 
     @Override
     public List<String> findVersions(ComponentCoordinate component) {
+        validateRepository();
         String key = component.groupId() + ":" + component.artifactId();
         return cache.computeIfAbsent(key, ignored -> loadVersions(component));
     }
@@ -60,7 +63,12 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
             if (items.isArray()) {
                 items.forEach(item -> {
                     String version = item.path("version").asText(null);
-                    if (version != null && !version.isBlank()) {
+                    boolean mavenComponent = "maven2".equals(item.path("format").asText());
+                    boolean hasPom = item.path("assets").isArray()
+                            && java.util.stream.StreamSupport.stream(item.path("assets").spliterator(), false)
+                            .map(asset -> asset.path("path").asText(""))
+                            .anyMatch(path -> path.endsWith(".pom"));
+                    if (mavenComponent && hasPom && version != null && !version.isBlank()) {
                         versions.add(version);
                     }
                 });
@@ -73,6 +81,19 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
         return List.copyOf(versions);
     }
 
+    private void validateRepository() {
+        if (repositoryValidated.get()) {
+            return;
+        }
+        JsonNode repository = getJson("/service/rest/v1/repositories/" + encodePathSegment(configuration.repository()),
+                "Nexus repository validation");
+        if (!"maven2".equals(repository.path("format").asText())) {
+            throw new VersionRepositoryException("Nexus repository " + configuration.repository()
+                    + " is not a maven2 repository");
+        }
+        repositoryValidated.set(true);
+    }
+
     private JsonNode get(ComponentCoordinate component, String continuationToken) {
         StringBuilder path = new StringBuilder("/service/rest/v1/search?repository=")
                 .append(encode(configuration.repository()))
@@ -82,7 +103,11 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
             path.append("&continuationToken=").append(encode(continuationToken));
         }
 
-        HttpRequest.Builder request = HttpRequest.newBuilder(resolve(path.toString()))
+        return getJson(path.toString(), "Nexus version search");
+    }
+
+    private JsonNode getJson(String path, String operation) {
+        HttpRequest.Builder request = HttpRequest.newBuilder(resolve(path))
                 .timeout(configuration.requestTimeout())
                 .header("Accept", "application/json")
                 .GET();
@@ -92,15 +117,15 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
             HttpResponse<String> response = httpClient.send(request.build(), HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
                 throw new VersionRepositoryException(
-                        "Nexus version search failed with HTTP " + response.statusCode() + ": " + response.body()
+                        operation + " failed with HTTP " + response.statusCode() + ": " + response.body()
                 );
             }
             return objectMapper.readTree(response.body());
         } catch (IOException exception) {
-            throw new VersionRepositoryException("Unable to search component versions in Nexus", exception);
+            throw new VersionRepositoryException(operation + " failed", exception);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            throw new VersionRepositoryException("Interrupted while searching component versions in Nexus", exception);
+            throw new VersionRepositoryException(operation + " was interrupted", exception);
         }
     }
 
@@ -124,5 +149,9 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
 
     private String encode(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    private String encodePathSegment(String value) {
+        return encode(value).replace("+", "%20");
     }
 }

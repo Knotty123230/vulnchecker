@@ -18,7 +18,7 @@ public final class MavenInvokerCommandRunner implements MavenCommandRunner {
     private static final String EFFECTIVE_POM_GOAL =
             "org.apache.maven.plugins:maven-help-plugin:3.5.2:effective-pom";
     private static final String DEPENDENCY_TREE_GOAL =
-            "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree";
+            "org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree";
 
     @Override
     public void generateModelAndDependencyTree(
@@ -42,17 +42,14 @@ public final class MavenInvokerCommandRunner implements MavenCommandRunner {
         request.setOutputHandler(SILENT);
         request.setErrorHandler(SILENT);
         request.setThreads("1C");
-        request.setGoals(List.of(EFFECTIVE_POM_GOAL, DEPENDENCY_TREE_GOAL));
+        request.addArgs(List.of(EFFECTIVE_POM_GOAL, DEPENDENCY_TREE_GOAL));
         request.setProperties(properties);
 
         try {
             DefaultInvoker invoker = new DefaultInvoker();
             invoker.setOutputHandler(SILENT);
             invoker.setErrorHandler(SILENT);
-            String mavenHome = MavenHomeResolver.resolve();
-            if (mavenHome != null) {
-                invoker.setMavenHome(new java.io.File(mavenHome));
-            }
+            MavenExecutableResolver.configure(invoker);
 
             InvocationResult result = invoker.execute(request);
             if (result.getExitCode() != 0) {

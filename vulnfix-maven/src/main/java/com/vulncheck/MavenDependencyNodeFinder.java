@@ -2,32 +2,31 @@ package com.vulncheck;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 
 public class MavenDependencyNodeFinder implements DependencyNodeFinder {
 
 
-    private static final String DEPENDENCY_TREE_GOAL = "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree";
+    private static final String DEPENDENCY_TREE_GOAL =
+            "org.apache.maven.plugins:maven-dependency-plugin:3.11.0:tree";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public DependencyNode find(Path projectPath) {
-        Path absolutePath = projectPath.toAbsolutePath();
-        Path normalizedPath = absolutePath.normalize();
+        Path normalizedPath = projectPath.toAbsolutePath().normalize();
+        Path pom = Files.isDirectory(normalizedPath) ? normalizedPath.resolve("pom.xml") : normalizedPath;
 
-        var pom = normalizedPath.resolve("pom.xml");
-
-        if (!Files.exists(pom)) {
-            IO.println("No pom.xml found in the project path: %s".formatted(normalizedPath));
+        if (!Files.isRegularFile(pom)) {
+            IO.println("No pom.xml found at: %s".formatted(pom));
             return null;
         }
 
-        File pomFile = pom.toFile();
-        Path depTree = normalizedPath.resolve("target/dependency-tree.json");
+        Path depTree = pom.getParent().resolve("target/dependency-tree.json");
 
         try {
             Files.createDirectories(depTree.getParent());
@@ -38,14 +37,18 @@ public class MavenDependencyNodeFinder implements DependencyNodeFinder {
             return null;
         }
 
-        ProcessBuilder processBuilder = new ProcessBuilder(
-                "mvn",
-                "-N",
-                DEPENDENCY_TREE_GOAL,
-                "-DoutputFile=%s".formatted(depTree),
-                "-DoutputType=json"
-        );
-        processBuilder.directory(pomFile.getParentFile());
+        List<String> command = new ArrayList<>();
+        command.add(mavenExecutable());
+        command.add("--batch-mode");
+        command.add("--non-recursive");
+        command.add("--file");
+        command.add(pom.toString());
+        command.add(DEPENDENCY_TREE_GOAL);
+        command.add("-DoutputFile=" + depTree.toAbsolutePath());
+        command.add("-DoutputType=json");
+        command.add("-Dverbose=true");
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.directory(pom.getParent().toFile());
         processBuilder.inheritIO();
 
         processBuilder.redirectErrorStream(true);
@@ -86,5 +89,13 @@ public class MavenDependencyNodeFinder implements DependencyNodeFinder {
             e.printStackTrace();
             return null;
         }
+    }
+
+    private String mavenExecutable() {
+        return isWindows() ? "mvn.cmd" : "mvn";
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
     }
 }

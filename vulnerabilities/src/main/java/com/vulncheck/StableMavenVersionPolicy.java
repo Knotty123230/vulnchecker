@@ -6,7 +6,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
-/** Selects the nearest stable Maven upgrades first to minimize patch blast radius. */
+/** Selects stable Maven upgrades, preferring the current release line without excluding major fixes. */
 public final class StableMavenVersionPolicy implements VersionSelectionPolicy {
 
     private final int maximumCandidates;
@@ -25,14 +25,15 @@ public final class StableMavenVersionPolicy implements VersionSelectionPolicy {
     @Override
     public List<String> selectNewerVersions(String currentVersion, List<String> availableVersions) {
         ComparableVersion current = new ComparableVersion(currentVersion);
-        String compatPrefix = compatibilityPrefix(currentVersion);
+        String releaseLine = compatibilityPrefix(currentVersion);
         return availableVersions.stream()
                 .filter(version -> version != null && !version.isBlank())
                 .filter(this::isStable)
-                .filter(version -> compatibilityPrefix(version).equals(compatPrefix))
                 .distinct()
                 .filter(version -> new ComparableVersion(version).compareTo(current) > 0)
-                .sorted(Comparator.comparing(ComparableVersion::new))
+                .sorted(Comparator
+                        .comparingInt((String version) -> compatibilityPrefix(version).equals(releaseLine) ? 0 : 1)
+                        .thenComparing(ComparableVersion::new))
                 .limit(maximumCandidates)
                 .toList();
     }
@@ -70,11 +71,6 @@ public final class StableMavenVersionPolicy implements VersionSelectionPolicy {
      * For some (like Netty 4.1.x vs 4.2.x), minor version changes are breaking.
      * We use major.minor matching to be safe.
      */
-    private boolean sameMajor(String version, String expectedMajor) {
-        String major = extractMajor(version);
-        return major.equals(expectedMajor);
-    }
-
     /**
      * Extracts major.minor prefix (e.g., "4.1" from "4.1.133.Final").
      */

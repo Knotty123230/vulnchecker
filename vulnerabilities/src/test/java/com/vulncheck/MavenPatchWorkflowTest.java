@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MavenPatchWorkflowTest {
@@ -32,7 +33,7 @@ class MavenPatchWorkflowTest {
         };
 
         List<AppliedPatch> applied = new MavenPatchWorkflow(
-                new MavenPomPatcher(), verifier, console::add
+                new MavenPomPatcher(), verifier, PatchSecurityVerifier.accepting(), console::add
         ).applyRecommendedPatches(project, List.of(candidate));
 
         assertEquals(1, applied.size());
@@ -49,8 +50,24 @@ class MavenPatchWorkflowTest {
         List<AppliedPatch> applied = new MavenPatchWorkflow(
                 new MavenPomPatcher(),
                 (path, ignored) -> BuildVerificationResult.failure(1, "tests failed"),
+                PatchSecurityVerifier.accepting(),
                 ignored -> { }
         ).applyRecommendedPatches(project, List.of(candidate));
+
+        assertTrue(applied.isEmpty());
+        assertEquals(original, Files.readString(project.resolve("pom.xml")));
+    }
+
+    @Test
+    void rollsBackWhenSecurityVerifierWasNotConfigured() throws IOException {
+        String original = pomWithDependency("1.0.0");
+        Files.writeString(project.resolve("pom.xml"), original);
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(),
+                (path, ignored) -> BuildVerificationResult.success(),
+                ignored -> { }
+        ).applyRecommendedPatches(project, List.of(directCandidate("1.0.0", "1.1.0")));
 
         assertTrue(applied.isEmpty());
         assertEquals(original, Files.readString(project.resolve("pom.xml")));
@@ -81,7 +98,8 @@ class MavenPatchWorkflowTest {
         );
 
         List<AppliedPatch> applied = new MavenPatchWorkflow(
-                new MavenPomPatcher(), (path, ignored) -> BuildVerificationResult.success(), ignored -> { }
+                new MavenPomPatcher(), (path, ignored) -> BuildVerificationResult.success(),
+                PatchSecurityVerifier.accepting(), ignored -> { }
         ).applyRecommendedPatches(project, List.of(new PatchCandidate(point, fix)));
 
         assertEquals(1, applied.size());
@@ -112,7 +130,8 @@ class MavenPatchWorkflowTest {
         );
 
         List<AppliedPatch> applied = new MavenPatchWorkflow(
-                new MavenPomPatcher(), (path, ignored) -> BuildVerificationResult.success(), ignored -> { }
+                new MavenPomPatcher(), (path, ignored) -> BuildVerificationResult.success(),
+                PatchSecurityVerifier.accepting(), ignored -> { }
         ).applyRecommendedPatches(project, List.of(new PatchCandidate(point, fix)));
 
         assertEquals(1, applied.size());
@@ -141,6 +160,107 @@ class MavenPatchWorkflowTest {
         String patchedPom = Files.readString(project.resolve("pom.xml"));
         assertTrue(patchedPom.contains("1.2.0"));
         assertTrue(!patchedPom.contains("1.1.0"));
+    }
+
+    @Test
+    void commitsOnlyFirstSuccessfulAlternativeForOneVulnerability() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithDependency("1.0.0"));
+        PatchCandidate first = directCandidate("1.0.0", "1.1.0");
+        PatchCandidate second = directCandidate("1.0.0", "1.2.0");
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(),
+                (path, candidate) -> BuildVerificationResult.success(),
+                (path, candidate) -> SecurityVerificationResult.safeResult(),
+                ignored -> { }
+        ).applyRecommendedPatches(project, List.of(first, second));
+
+        assertEquals(1, applied.size());
+        String patchedPom = Files.readString(project.resolve("pom.xml"));
+        assertTrue(patchedPom.contains("1.1.0"));
+        assertTrue(!patchedPom.contains("1.2.0"));
+    }
+
+    @Test
+    void bomUpgradeNeverWritesBomVersionIntoVulnerableDependency() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithBomAndExplicitDependency("3.3.0", "4.1.100.Final"));
+        Vulnerability vulnerability = vulnerability("4.1.100.Final", "4.1.110.Final");
+        DependencyNode vulnerableNode = node("4.1.100.Final");
+        ComponentCoordinate currentBom = new ComponentCoordinate("org.example", "platform-bom", "3.3.0");
+        VersionOwner owner = new VersionOwner(VersionOwnerType.IMPORTED_BOM, currentBom, null, project.resolve("pom.xml"));
+        MutationPoint point = new MutationPoint(MutationType.UPDATE_IMPORTED_BOM, currentBom, vulnerableNode, owner);
+        FixCandidate fix = new FixCandidate(
+                vulnerability,
+                vulnerableNode,
+                new FixCandidate.ComponentFix(
+                        List.of(), new ComponentCoordinate("org.example", "platform-bom", "3.3.1")
+                ),
+                false,
+                List.of()
+        );
+
+        new MavenPatchWorkflow(
+                new MavenPomPatcher(),
+                (path, candidate) -> BuildVerificationResult.success(),
+                PatchSecurityVerifier.accepting(),
+                ignored -> { }
+        ).applyRecommendedPatches(project, List.of(new PatchCandidate(point, fix)));
+
+        String patchedPom = Files.readString(project.resolve("pom.xml"));
+        assertTrue(patchedPom.contains("<artifactId>platform-bom</artifactId>"));
+        assertTrue(patchedPom.contains("<version>3.3.1</version>"));
+        assertTrue(patchedPom.contains("<artifactId>netty-handler</artifactId>"));
+        assertTrue(patchedPom.contains("<version>4.1.100.Final</version>"));
+        assertTrue(!patchedPom.contains("<artifactId>netty-handler</artifactId>\n      <version>3.3.1</version>"));
+    }
+
+    @Test
+    void refusesNonAtomicUpgradeOfLocalRelativePathParent() throws IOException {
+        Path child = Files.createDirectories(project.resolve("child"));
+        Files.writeString(project.resolve("pom.xml"), """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>parent</artifactId>
+                  <version>1.0.0</version>
+                  <packaging>pom</packaging>
+                </project>
+                """);
+        String childPom = """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <parent>
+                    <groupId>com.example</groupId>
+                    <artifactId>parent</artifactId>
+                    <version>1.0.0</version>
+                  </parent>
+                  <artifactId>child</artifactId>
+                </project>
+                """;
+        Files.writeString(child.resolve("pom.xml"), childPom);
+        ComponentCoordinate parent = new ComponentCoordinate("com.example", "parent", "1.0.0");
+        Vulnerability vulnerability = vulnerability("4.1.100.Final", "4.1.110.Final");
+        DependencyNode node = node("4.1.100.Final");
+        PatchCandidate candidate = new PatchCandidate(
+                new MutationPoint(
+                        MutationType.UPDATE_PARENT_POM,
+                        parent,
+                        node,
+                        new VersionOwner(VersionOwnerType.PARENT_POM, parent, null, child.resolve("pom.xml"))
+                ),
+                new FixCandidate(
+                        vulnerability,
+                        node,
+                        new FixCandidate.ComponentFix(
+                                List.of(), new ComponentCoordinate("com.example", "parent", "1.1.0")
+                        ),
+                        false,
+                        List.of()
+                )
+        );
+
+        assertThrows(PomPatchException.class, () -> new MavenPomPatcher().apply(child, candidate));
+        assertEquals(childPom, Files.readString(child.resolve("pom.xml")));
     }
 
     private PatchCandidate directCandidate(String currentVersion, String replacementVersion) {
@@ -234,5 +354,34 @@ class MavenPatchWorkflowTest {
                   </dependencyManagement>
                 </project>
                 """.formatted(version);
+    }
+
+    private String pomWithBomAndExplicitDependency(String bomVersion, String dependencyVersion) {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>org.example</groupId>
+                        <artifactId>platform-bom</artifactId>
+                        <version>%s</version>
+                        <type>pom</type>
+                        <scope>import</scope>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                  <dependencies>
+                    <dependency>
+                      <groupId>io.netty</groupId>
+                      <artifactId>netty-handler</artifactId>
+                      <version>%s</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """.formatted(bomVersion, dependencyVersion);
     }
 }

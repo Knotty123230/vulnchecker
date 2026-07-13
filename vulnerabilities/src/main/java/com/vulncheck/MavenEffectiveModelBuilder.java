@@ -133,7 +133,6 @@ public final class MavenEffectiveModelBuilder {
             ));
         }
 
-        List<VersionOwner> inherited = new ArrayList<>();
         ComponentCoordinate source = effectiveDeclaration.source();
         VersionOwner vo = new VersionOwner(VersionOwnerType.PARENT_POM, raw.parent(), null, pom);
         if (source != null) {
@@ -149,13 +148,10 @@ public final class MavenEffectiveModelBuilder {
             }
         }
 
-        importedBoms.forEach(bom -> inherited.add(new VersionOwner(
-                VersionOwnerType.IMPORTED_BOM, bom, null, pom
-        )));
-        if (raw.parent() != null) {
-            inherited.add(vo);
-        }
-        return inherited;
+        // A managed dependency can originate in only one effective declaration. When Maven
+        // did not emit provenance, guessing every imported BOM and the parent creates unsafe
+        // mutation points. Let the resolver fall back to an explicit upstream dependency.
+        return List.of();
     }
 
     private boolean sameComponent(ComponentCoordinate first, ComponentCoordinate second) {

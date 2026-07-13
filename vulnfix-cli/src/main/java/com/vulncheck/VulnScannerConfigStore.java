@@ -1,6 +1,5 @@
 package com.vulncheck;
 
-import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -48,7 +47,6 @@ final class VulnScannerConfigStore {
         }
     }
 
-    @Nonnull
     private Properties getProperties(VulnScannerConfiguration configuration) {
         Properties properties = new Properties();
         SonatypeCredentials credentials = configuration.credentials();

@@ -9,4 +9,10 @@ public interface PatchSecurityVerifier {
     static PatchSecurityVerifier accepting() {
         return (projectPath, candidate) -> SecurityVerificationResult.safeResult();
     }
+
+    static PatchSecurityVerifier unconfigured() {
+        return (projectPath, candidate) -> SecurityVerificationResult.unsafe(
+                "security verifier is not configured"
+        );
+    }
 }

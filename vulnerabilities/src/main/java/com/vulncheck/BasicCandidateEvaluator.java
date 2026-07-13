@@ -1,5 +1,7 @@
 package com.vulncheck;
 
+import org.apache.maven.artifact.versioning.ComparableVersion;
+
 /**
  * Minimal local validation. A production evaluator should re-resolve Maven,
  * calculate graph diff, verify alignment, then compile and run tests.
@@ -9,9 +11,13 @@ public final class BasicCandidateEvaluator implements CandidateEvaluator {
     @Override
     public CandidateEvaluation evaluate(PatchCandidate patchCandidate) {
         FixCandidate candidate = patchCandidate.candidate();
-        if (patchCandidate.mutationPoint().component().version()
-                .equals(candidate.replacement().coordinate().version())) {
-            return CandidateEvaluation.rejected("replacement version equals the resolved version");
+        String currentVersion = patchCandidate.mutationPoint().component().version();
+        String replacementVersion = candidate.replacement().coordinate().version();
+        int comparison = new ComparableVersion(replacementVersion).compareTo(new ComparableVersion(currentVersion));
+        if (comparison <= 0) {
+            return CandidateEvaluation.rejected(comparison == 0
+                    ? "replacement version equals the resolved version"
+                    : "replacement would downgrade the resolved version");
         }
 
         int risk = switch (patchCandidate.mutationPoint().type()) {
