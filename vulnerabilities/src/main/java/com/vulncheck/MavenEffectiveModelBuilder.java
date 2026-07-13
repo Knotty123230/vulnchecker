@@ -126,7 +126,7 @@ public final class MavenEffectiveModelBuilder {
             return direct;
         }
 
-        PomDependency managed = findByGa(raw.dependencyManagement(), component);
+        PomDependency managed = findUniqueByGa(raw.dependencyManagement(), component);
         if (managed != null && !managed.isImportedBom()) {
             return List.of(ownerForDeclaration(
                     VersionOwnerType.DEPENDENCY_MANAGEMENT, component, managed.version(), pom, raw.properties()
@@ -160,7 +160,7 @@ public final class MavenEffectiveModelBuilder {
     }
 
     private List<VersionOwner> directOwners(ComponentCoordinate component, Path pom, PomView raw) {
-        PomDependency direct = findByGa(raw.dependencies(), component);
+        PomDependency direct = findUniqueByGa(raw.dependencies(), component);
         if (direct == null || direct.version() == null || direct.version().isBlank()) {
             return List.of();
         }
@@ -183,12 +183,12 @@ public final class MavenEffectiveModelBuilder {
         return new VersionOwner(defaultType, component, null, pom);
     }
 
-    private PomDependency findByGa(List<PomDependency> dependencies, ComponentCoordinate component) {
-        return dependencies.stream()
+    private PomDependency findUniqueByGa(List<PomDependency> dependencies, ComponentCoordinate component) {
+        List<PomDependency> matches = dependencies.stream()
                 .filter(dependency -> component.groupId().equals(dependency.groupId()))
                 .filter(dependency -> component.artifactId().equals(dependency.artifactId()))
-                .findFirst()
-                .orElse(null);
+                .toList();
+        return matches.size() == 1 ? matches.getFirst() : null;
     }
 
     private List<DependencyPath> readDependencyPaths(Path dependencyTree) {

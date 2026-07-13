@@ -3,6 +3,7 @@ package com.vulncheck;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -123,6 +124,36 @@ class VulnerabilitiesFixerTest {
         assertEquals(1, candidates.size());
         assertEquals(MutationType.UPDATE_IMPORTED_BOM, candidates.getFirst().mutationPoint().type());
         assertEquals(targetBom, candidates.getFirst().candidate().replacement().coordinate());
+    }
+
+    @Test
+    void doesNotTrustDirectFlagWithoutDirectOwnerInRealMavenModel() {
+        DependencyNode library = node("com.example", "library", "1.0.0");
+        DependencyGraph graph = DependencyGraph.empty();
+        graph.addNode(library);
+        Vulnerability vulnerability = vulnerability(
+                "com.example", "library", "1.0.0", "1.0.1", true, List.of()
+        );
+        EffectiveMavenModel model = new EffectiveMavenModel(
+                Path.of("pom.xml"), null, null, List.of(), List.of(), List.of()
+        );
+        VulnerabilitiesFixer fixer = new VulnerabilitiesFixer(
+                List.of(vulnerability), graph, model,
+                new RemediationMutationPointResolver(new EffectiveModelVersionOwnerResolver()),
+                new SonatypeCandidateGenerator(), new BasicCandidateEvaluator()
+        );
+
+        assertTrue(fixer.findPatchCandidates().isEmpty());
+    }
+
+    @Test
+    void keepsCrossReleaseLineRemediationForManualReview() {
+        DependencyNode netty = node("io.netty", "netty-handler", "4.1.133.Final");
+        Vulnerability vulnerability = vulnerability(
+                "io.netty", "netty-handler", "4.1.133.Final", "4.2.15.Final", true, List.of()
+        );
+
+        assertTrue(fixer(vulnerability, netty).findPatchCandidates().isEmpty());
     }
 
     private static VulnerabilitiesFixer fixer(Vulnerability vulnerability, DependencyNode... nodes) {

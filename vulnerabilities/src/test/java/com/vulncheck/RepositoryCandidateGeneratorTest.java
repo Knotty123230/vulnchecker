@@ -17,7 +17,19 @@ class RepositoryCandidateGeneratorTest {
                 List.of("2.0.0", "1.2.0", "1.3.0-RC1", "1.2.1", "1.1.9", "1.5.0", "2.0.0-SNAPSHOT")
         );
 
-        assertEquals(List.of("1.2.1", "1.5.0", "2.0.0"), selected);
+        assertEquals(List.of("1.2.1", "1.5.0"), selected);
+    }
+
+    @Test
+    void limitsLargeCatalogToReleaseLineEdgesAndDoesNotSpeculateAcrossMajor() {
+        StableMavenVersionPolicy policy = new StableMavenVersionPolicy();
+
+        List<String> selected = policy.selectNewerVersions(
+                "3.5.14",
+                List.of("3.5.15", "3.5.16", "3.5.17", "3.5.18", "4.0.0", "4.1.0")
+        );
+
+        assertEquals(List.of("3.5.15", "3.5.18"), selected);
     }
 
     @Test

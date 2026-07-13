@@ -85,6 +85,19 @@ public final class MavenPatchWorkflow {
             }
 
             console.accept("  TRY  " + describe(candidate));
+            BuildVerificationResult readiness;
+            try {
+                readiness = buildVerifier.prepare(projectPath, candidate);
+            } catch (RuntimeException exception) {
+                actionCache.put(actionKey, ActionStatus.BUILD_FAILED);
+                console.accept("  SKIP preflight failed" + messageSuffix(exception.getMessage()));
+                continue;
+            }
+            if (!readiness.successful()) {
+                actionCache.put(actionKey, ActionStatus.BUILD_FAILED);
+                console.accept("  SKIP preflight failed" + messageSuffix(readiness.failure()));
+                continue;
+            }
             try (PomPatchTransaction transaction = pomPatcher.apply(projectPath, candidate)) {
                 console.accept("  RUN  Maven graph, convergence and test-compile verification");
                 BuildVerificationResult verification = buildVerifier.verify(projectPath, candidate);
@@ -105,6 +118,7 @@ public final class MavenPatchWorkflow {
                 }
 
                 transaction.commit();
+                buildVerifier.patchCommitted(projectPath, candidate);
                 actionCache.put(actionKey, ActionStatus.COMMITTED);
                 applied.add(new AppliedPatch(candidate, verification));
                 console.accept("  OK   patch committed");

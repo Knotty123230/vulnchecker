@@ -22,7 +22,9 @@ public final class SonatypeCandidateGenerator implements CandidateGenerator {
 
         String currentVersion = mutationPoint.component().version();
         String newVersion = replacement.version();
-        int priority = isCompatibleUpgrade(currentVersion, newVersion) ? 0 : 50;
+        if (!MavenReleaseLine.compatible(currentVersion, newVersion)) {
+            return List.of();
+        }
 
         FixCandidate candidate = new FixCandidate(
                 vulnerability,
@@ -31,43 +33,7 @@ public final class SonatypeCandidateGenerator implements CandidateGenerator {
                 mutationPoint.type() == MutationType.UPDATE_DIRECT_DEPENDENCY,
                 sonatypeParentFixes(remediation)
         );
-        return List.of(new PatchCandidate(mutationPoint, candidate, priority));
-    }
-
-    /**
-     * Checks if the version upgrade is compatible (no breaking major/minor changes).
-     * Same logic as StableMavenVersionPolicy.compatibilityPrefix.
-     */
-    private boolean isCompatibleUpgrade(String currentVersion, String newVersion) {
-        if (currentVersion == null || newVersion == null) return true;
-        String currentPrefix = compatibilityPrefix(currentVersion);
-        String newPrefix = compatibilityPrefix(newVersion);
-        return currentPrefix.equals(newPrefix);
-    }
-
-    private String compatibilityPrefix(String version) {
-        String[] segments = version.split("[.-]");
-        int numericSegments = 0;
-        for (String seg : segments) {
-            if (seg.matches("\\d+")) numericSegments++;
-            else break;
-        }
-        if (numericSegments >= 4 || (numericSegments == 3 && segments.length > 3)) {
-            return extractMajorMinor(version);
-        }
-        return extractMajor(version);
-    }
-
-    private String extractMajor(String version) {
-        int dot = version.indexOf('.');
-        return dot > 0 ? version.substring(0, dot) : version;
-    }
-
-    private String extractMajorMinor(String version) {
-        int firstDot = version.indexOf('.');
-        if (firstDot < 0) return version;
-        int secondDot = version.indexOf('.', firstDot + 1);
-        return secondDot > 0 ? version.substring(0, secondDot) : version;
+        return List.of(new PatchCandidate(mutationPoint, candidate, 0));
     }
 
     private ComponentCoordinate replacementFor(MutationPoint mutationPoint, RemediationCandidate remediation) {

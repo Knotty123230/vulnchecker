@@ -187,8 +187,6 @@ public class VulnScanner implements Runnable {
                     System.out::println
             );
             List<AppliedPatch> applied = patchWorkflow.applyRecommendedPatches(path, candidates);
-            System.out.println();
-            System.out.printf("Applied %d verified patch(es).%n", applied.size());
 
             // Re-scan loop: keep fixing until all resolved or nothing more can be fixed
             int iteration = 1;
@@ -446,27 +444,7 @@ public class VulnScanner implements Runnable {
         }
 
         private boolean isCompatibleVersion(String current, String target) {
-            if (current == null || target == null) return true;
-            String currentPrefix = compatPrefix(current);
-            String targetPrefix = compatPrefix(target);
-            return currentPrefix.equals(targetPrefix);
-        }
-
-        private String compatPrefix(String version) {
-            String[] segments = version.split("[.-]");
-            int numericSegments = 0;
-            for (String seg : segments) {
-                if (seg.matches("\\d+")) numericSegments++;
-                else break;
-            }
-            if (numericSegments >= 4 || (numericSegments == 3 && segments.length > 3)) {
-                int firstDot = version.indexOf('.');
-                if (firstDot < 0) return version;
-                int secondDot = version.indexOf('.', firstDot + 1);
-                return secondDot > 0 ? version.substring(0, secondDot) : version;
-            }
-            int dot = version.indexOf('.');
-            return dot > 0 ? version.substring(0, dot) : version;
+            return MavenReleaseLine.compatible(current, target);
         }
 
         private void printVersionConsistency(Path projectPath, NexusRepositoryConfiguration nexus) {

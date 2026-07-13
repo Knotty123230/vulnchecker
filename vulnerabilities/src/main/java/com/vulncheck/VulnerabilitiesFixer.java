@@ -109,20 +109,26 @@ public class VulnerabilitiesFixer {
                 .sorted(Comparator
                         .comparingInt((EvaluatedCandidate candidate) -> candidate.evaluation().riskScore())
                         .thenComparingInt(candidate -> candidate.patchCandidate().recommendationPriority())
-                        .thenComparing(candidate -> candidateKey(candidate.patchCandidate().candidate())))
-                .forEach(candidate -> unique.putIfAbsent(candidateKey(candidate.patchCandidate().candidate()), candidate));
+                .thenComparing(candidate -> candidateKey(candidate.patchCandidate())))
+                .forEach(candidate -> unique.putIfAbsent(candidateKey(candidate.patchCandidate()), candidate));
 
         return unique.values().stream()
                 .map(EvaluatedCandidate::patchCandidate)
                 .toList();
     }
 
-    private String candidateKey(FixCandidate candidate) {
+    private String candidateKey(PatchCandidate patchCandidate) {
+        FixCandidate candidate = patchCandidate.candidate();
         DependencyNode node = candidate.node();
         ComponentCoordinate replacement = candidate.replacement().coordinate();
+        MutationPoint point = patchCandidate.mutationPoint();
+        VersionOwner owner = point.owner();
         return candidate.vulnerability().getId() + "|"
                 + node.groupId() + ":" + node.artifactId() + ":" + node.version() + "|"
-                + replacement.groupId() + ":" + replacement.artifactId() + ":" + replacement.version();
+                + replacement.groupId() + ":" + replacement.artifactId() + ":" + replacement.version() + "|"
+                + point.type() + "|" + point.component() + "|"
+                + (owner == null ? "" : owner.type() + ":" + owner.coordinate() + ":"
+                + owner.propertyName() + ":" + owner.pomPath());
     }
 
     private record EvaluatedCandidate(PatchCandidate patchCandidate, CandidateEvaluation evaluation) {

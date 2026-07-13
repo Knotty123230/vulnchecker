@@ -12,7 +12,9 @@ import java.time.Duration;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NexusComponentVersionRepositoryTest {
 
@@ -55,6 +57,46 @@ class NexusComponentVersionRepositoryTest {
 
         assertThrows(VersionRepositoryException.class, () -> repository.findVersions(
                 new ComponentCoordinate("com.example", "library", "1.0.0")
+        ));
+    }
+
+    @Test
+    void checksConcreteArtifactAndRejectsFirewallQuarantine() throws IOException {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/service/rest/v1/repositories/releases", exchange -> json(exchange, 200,
+                "{\"name\":\"releases\",\"format\":\"maven2\",\"type\":\"hosted\"}"));
+        server.createContext("/service/rest/v1/search", exchange -> json(exchange, 200,
+                page("1.1.0", null, true)));
+        server.createContext("/repository/releases/com/example/library/1.1.0/library-1.1.0.jar", exchange -> {
+            exchange.sendResponseHeaders(403, -1);
+            exchange.close();
+        });
+        server.start();
+
+        NexusComponentVersionRepository repository = new NexusComponentVersionRepository(configuration("releases"));
+
+        assertFalse(repository.isAvailable(
+                new ComponentCoordinate("com.example", "library", "1.1.0"), "jar"
+        ));
+    }
+
+    @Test
+    void acceptsDownloadableConcreteArtifact() throws IOException {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/service/rest/v1/repositories/releases", exchange -> json(exchange, 200,
+                "{\"name\":\"releases\",\"format\":\"maven2\",\"type\":\"hosted\"}"));
+        server.createContext("/service/rest/v1/search", exchange -> json(exchange, 200,
+                page("1.1.0", null, true)));
+        server.createContext("/repository/releases/com/example/library/1.1.0/library-1.1.0.jar", exchange -> {
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+
+        NexusComponentVersionRepository repository = new NexusComponentVersionRepository(configuration("releases"));
+
+        assertTrue(repository.isAvailable(
+                new ComponentCoordinate("com.example", "library", "1.1.0"), "jar"
         ));
     }
 

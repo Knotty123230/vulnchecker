@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -39,6 +40,44 @@ class MavenPatchWorkflowTest {
         assertEquals(1, applied.size());
         assertTrue(Files.readString(project.resolve("pom.xml")).contains("1.1.0"));
         assertTrue(console.stream().anyMatch(line -> line.contains("patch committed")));
+    }
+
+    @Test
+    void capturesBuildBaselineBeforeMutatingPomAndAdvancesItOnlyAfterCommit() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithDependency("1.0.0"));
+        PatchCandidate candidate = directCandidate("1.0.0", "1.1.0");
+        AtomicBoolean prepared = new AtomicBoolean();
+        AtomicBoolean committed = new AtomicBoolean();
+        ProjectBuildVerifier verifier = new ProjectBuildVerifier() {
+            @Override
+            public BuildVerificationResult prepare(Path path, PatchCandidate ignored) {
+                try {
+                    assertTrue(Files.readString(path.resolve("pom.xml")).contains("1.0.0"));
+                    prepared.set(true);
+                    return BuildVerificationResult.success();
+                } catch (IOException exception) {
+                    throw new RuntimeException(exception);
+                }
+            }
+
+            @Override
+            public BuildVerificationResult verify(Path path, PatchCandidate ignored) {
+                assertTrue(prepared.get());
+                return BuildVerificationResult.success();
+            }
+
+            @Override
+            public void patchCommitted(Path path, PatchCandidate ignored) {
+                committed.set(true);
+            }
+        };
+
+        new MavenPatchWorkflow(
+                new MavenPomPatcher(), verifier, PatchSecurityVerifier.accepting(), ignored -> { }
+        ).applyRecommendedPatches(project, List.of(candidate));
+
+        assertTrue(prepared.get());
+        assertTrue(committed.get());
     }
 
     @Test

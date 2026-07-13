@@ -28,4 +28,15 @@ public final class ResilientComponentVersionRepository implements ComponentVersi
             return List.of();
         }
     }
+
+    @Override
+    public boolean isAvailable(ComponentCoordinate component, String extension) {
+        try {
+            return delegate.isAvailable(component, extension);
+        } catch (VersionRepositoryException exception) {
+            console.accept("[VERSIONS] Unable to verify " + component.groupId() + ":"
+                    + component.artifactId() + ":" + component.version() + ": " + exception.getMessage());
+            return false;
+        }
+    }
 }

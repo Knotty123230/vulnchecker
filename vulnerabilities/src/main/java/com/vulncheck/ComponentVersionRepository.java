@@ -7,6 +7,11 @@ import java.util.List;
 public interface ComponentVersionRepository {
     List<String> findVersions(ComponentCoordinate component);
 
+    /** Confirms that the concrete artifact can be downloaded, not merely found in repository metadata. */
+    default boolean isAvailable(ComponentCoordinate component, String extension) {
+        return findVersions(component).contains(component.version());
+    }
+
     static ComponentVersionRepository empty() {
         return component -> List.of();
     }

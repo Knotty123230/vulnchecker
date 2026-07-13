@@ -27,7 +27,10 @@ public final class RemediationMutationPointResolver implements MutationPointReso
         List<MutationPoint> points = new ArrayList<>();
         List<VersionOwner> resolvedOwners = versionOwnerResolver.resolveOwners(vulnerable, model);
 
-        if (remediation != null && remediation.directDependency() && resolvedOwners.isEmpty()) {
+        if (model.projectPom() == null
+                && remediation != null
+                && remediation.directDependency()
+                && resolvedOwners.isEmpty()) {
             vulnerableNodes.forEach(node -> points.add(new MutationPoint(
                     MutationType.UPDATE_DIRECT_DEPENDENCY, vulnerable, node,
                     new VersionOwner(VersionOwnerType.DIRECT_DEPENDENCY, vulnerable, null, null)
@@ -72,7 +75,7 @@ public final class RemediationMutationPointResolver implements MutationPointReso
 
         // Fallback: if still no points, use the dependency tree to find who pulls this artifact
         // and create a mutation point to upgrade that parent instead of overriding
-        if (points.isEmpty() && !vulnerableNodes.isEmpty()) {
+        if (model.projectPom() == null && points.isEmpty() && !vulnerableNodes.isEmpty()) {
             List<DependencyNode> parents = new ArrayList<>();
             graph.findParentNodes(vulnerableNodes).forEach(parents::add);
             // Filter to parents that are likely direct dependencies (have their own version declared)

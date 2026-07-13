@@ -26,6 +26,7 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final ConcurrentMap<String, List<String>> cache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Boolean> availabilityCache = new ConcurrentHashMap<>();
     private final AtomicBoolean repositoryValidated = new AtomicBoolean();
 
     public NexusComponentVersionRepository(NexusRepositoryConfiguration configuration) {
@@ -51,6 +52,19 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
         validateRepository();
         String key = component.groupId() + ":" + component.artifactId();
         return cache.computeIfAbsent(key, ignored -> loadVersions(component));
+    }
+
+    @Override
+    public boolean isAvailable(ComponentCoordinate component, String extension) {
+        if (!findVersions(component).contains(component.version())) {
+            return false;
+        }
+        String normalizedExtension = extension == null || extension.isBlank() ? "jar" : extension;
+        String key = component.groupId() + ":" + component.artifactId() + ":"
+                + component.version() + ":" + normalizedExtension;
+        return availabilityCache.computeIfAbsent(
+                key, ignored -> probeArtifact(component, normalizedExtension)
+        );
     }
 
     private List<String> loadVersions(ComponentCoordinate component) {
@@ -127,6 +141,54 @@ public final class NexusComponentVersionRepository implements ComponentVersionRe
             Thread.currentThread().interrupt();
             throw new VersionRepositoryException(operation + " was interrupted", exception);
         }
+    }
+
+    private boolean probeArtifact(ComponentCoordinate component, String extension) {
+        URI artifact = resolve(repositoryArtifactPath(component, extension));
+        HttpRequest.Builder head = HttpRequest.newBuilder(artifact)
+                .timeout(configuration.requestTimeout())
+                .method("HEAD", HttpRequest.BodyPublishers.noBody());
+        addAuthorization(head);
+        int status = sendStatus(head.build(), "Nexus artifact availability probe");
+        if (status == 405) {
+            HttpRequest.Builder rangedGet = HttpRequest.newBuilder(artifact)
+                    .timeout(configuration.requestTimeout())
+                    .header("Range", "bytes=0-0")
+                    .GET();
+            addAuthorization(rangedGet);
+            status = sendStatus(rangedGet.build(), "Nexus artifact availability probe");
+        }
+        if (status >= 200 && status < 300) {
+            return true;
+        }
+        if (status == 403 || status == 404) {
+            return false;
+        }
+        throw new VersionRepositoryException(
+                "Nexus artifact availability probe failed with HTTP " + status + " for " + artifact
+        );
+    }
+
+    private int sendStatus(HttpRequest request, String operation) {
+        try {
+            return httpClient.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
+        } catch (IOException exception) {
+            throw new VersionRepositoryException(operation + " failed", exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new VersionRepositoryException(operation + " was interrupted", exception);
+        }
+    }
+
+    private String repositoryArtifactPath(ComponentCoordinate component, String extension) {
+        String groupPath = java.util.Arrays.stream(component.groupId().split("\\."))
+                .map(this::encodePathSegment)
+                .collect(java.util.stream.Collectors.joining("/"));
+        String artifact = encodePathSegment(component.artifactId());
+        String version = encodePathSegment(component.version());
+        return "/repository/" + encodePathSegment(configuration.repository()) + "/" + groupPath + "/"
+                + artifact + "/" + version + "/" + artifact + "-" + version + "."
+                + encodePathSegment(extension);
     }
 
     private void addAuthorization(HttpRequest.Builder request) {
