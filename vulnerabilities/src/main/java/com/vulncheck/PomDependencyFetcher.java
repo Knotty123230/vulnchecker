@@ -26,12 +26,13 @@ import java.util.concurrent.ConcurrentMap;
  * 3. If a project dependency has the same groupId as another project dep and
  *    appears in the POM's dependencies with version=${project.version} or exact version — they're companions
  */
-public final class PomDependencyFetcher {
+public final class PomDependencyFetcher implements CompanionDependencyResolver {
 
     public record PomDependency(String groupId, String artifactId, String version) {
-        public boolean isProjectVersion() {
+        public boolean isAlignedWith(String ownerVersion) {
             return "${project.version}".equals(version)
-                    || "${version}".equals(version);
+                    || "${version}".equals(version)
+                    || Objects.equals(ownerVersion, version);
         }
     }
 
@@ -69,6 +70,7 @@ public final class PomDependencyFetcher {
      * Checks only explicit same-group dependencies tied to ${project.version}.
      * Parent modules are paths rather than artifact IDs and are deliberately not guessed.
      */
+    @Override
     public List<String> findCompanionArtifactIds(String groupId, String artifactId, String version) {
         Set<String> companions = new LinkedHashSet<>();
 
@@ -76,7 +78,7 @@ public final class PomDependencyFetcher {
         List<PomDependency> deps = fetchDependencies(groupId, artifactId, version);
         for (PomDependency dep : deps) {
             if (dep.groupId().equals(groupId)) {
-                if (dep.isProjectVersion()) {
+                if (dep.isAlignedWith(version)) {
                     companions.add(dep.artifactId());
                 }
             }

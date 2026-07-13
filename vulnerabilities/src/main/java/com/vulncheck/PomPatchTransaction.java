@@ -11,11 +11,17 @@ public final class PomPatchTransaction implements AutoCloseable {
 
     private final Path pom;
     private final byte[] originalContent;
+    private final int mutationCount;
     private boolean committed;
 
-    PomPatchTransaction(Path pom, byte[] originalContent) {
+    PomPatchTransaction(Path pom, byte[] originalContent, int mutationCount) {
         this.pom = pom;
         this.originalContent = originalContent.clone();
+        this.mutationCount = mutationCount;
+    }
+
+    public int mutationCount() {
+        return mutationCount;
     }
 
     public void commit() {

@@ -16,16 +16,25 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /** Applies one candidate to exactly one semantic location in the project's POM. */
 public final class MavenPomPatcher {
 
+    private final CompanionDependencyResolver companionDependencyResolver;
+
     public MavenPomPatcher() {
+        this((CompanionDependencyResolver) null);
     }
 
-    /** Kept for source compatibility. Companion discovery is intentionally no longer used. */
-    public MavenPomPatcher(PomDependencyFetcher ignored) {
+    public MavenPomPatcher(PomDependencyFetcher dependencyFetcher) {
+        this((CompanionDependencyResolver) dependencyFetcher);
+    }
+
+    public MavenPomPatcher(CompanionDependencyResolver companionDependencyResolver) {
+        this.companionDependencyResolver = companionDependencyResolver;
     }
 
     public PomPatchTransaction apply(Path projectPath, PatchCandidate patchCandidate) {
@@ -64,7 +73,7 @@ public final class MavenPomPatcher {
             String originalText = new String(original, StandardCharsets.UTF_8);
             String patchedText = new FormattingPreservingPomEditor().apply(originalText, replacements);
             writeAtomically(pom, patchedText);
-            return new PomPatchTransaction(pom, original);
+            return new PomPatchTransaction(pom, original, replacements.size());
         } catch (RuntimeException exception) {
             restore(pom, original);
             throw exception;
@@ -112,7 +121,62 @@ public final class MavenPomPatcher {
                 ? child(project, "dependencies")
                 : child(child(project, "dependencyManagement"), "dependencies");
         List<Element> matching = matchingDependencies(dependencies, component, false);
+        matching = alignedDependencyDeclarations(dependencies, component, matching);
         return setDependencyVersions(matching, component, newVersion, replacements);
+    }
+
+    private List<Element> alignedDependencyDeclarations(
+            Element dependencies,
+            ComponentCoordinate component,
+            List<Element> primaryDeclarations
+    ) {
+        if (companionDependencyResolver == null || primaryDeclarations.isEmpty()) {
+            return primaryDeclarations;
+        }
+
+        List<Element> eligible = children(dependencies, "dependency").stream()
+                .filter(this::isDefaultJarDependency)
+                .filter(dependency -> component.groupId().equals(text(dependency, "groupId")))
+                .filter(dependency -> component.version().equals(text(dependency, "version")))
+                .toList();
+        Set<String> alignedArtifactIds = new LinkedHashSet<>();
+        alignedArtifactIds.add(component.artifactId());
+
+        boolean expanded;
+        do {
+            expanded = false;
+            for (Element candidate : eligible) {
+                String candidateArtifactId = text(candidate, "artifactId");
+                if (alignedArtifactIds.contains(candidateArtifactId)) {
+                    continue;
+                }
+                boolean related = alignedArtifactIds.stream().anyMatch(alignedArtifactId ->
+                        arePublishedCompanions(
+                                component.groupId(), alignedArtifactId, candidateArtifactId, component.version()
+                        )
+                );
+                if (related) {
+                    alignedArtifactIds.add(candidateArtifactId);
+                    expanded = true;
+                }
+            }
+        } while (expanded);
+
+        return eligible.stream()
+                .filter(dependency -> alignedArtifactIds.contains(text(dependency, "artifactId")))
+                .toList();
+    }
+
+    private boolean arePublishedCompanions(
+            String groupId,
+            String firstArtifactId,
+            String secondArtifactId,
+            String version
+    ) {
+        return companionDependencyResolver.findCompanionArtifactIds(groupId, firstArtifactId, version)
+                .contains(secondArtifactId)
+                || companionDependencyResolver.findCompanionArtifactIds(groupId, secondArtifactId, version)
+                .contains(firstArtifactId);
     }
 
     private boolean updateImportedBom(

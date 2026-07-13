@@ -144,7 +144,10 @@ public final class MavenPatchWorkflow {
                 buildVerifier.patchCommitted(projectPath, candidate);
                 actionCache.put(actionKey, ActionStatus.COMMITTED);
                 applied.add(new AppliedPatch(candidate, verification));
-                console.accept("  OK   patch committed");
+                String alignment = transaction.mutationCount() > 1
+                        ? " (" + transaction.mutationCount() + " aligned version declarations)"
+                        : "";
+                console.accept("  OK   patch committed" + alignment);
                 return true;
             } catch (RuntimeException exception) {
                 console.accept("  SKIP " + exception.getMessage());

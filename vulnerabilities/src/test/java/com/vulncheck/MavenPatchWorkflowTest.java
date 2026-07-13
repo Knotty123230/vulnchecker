@@ -387,6 +387,69 @@ class MavenPatchWorkflowTest {
     }
 
     @Test
+    void atomicallyUpdatesPublishedCompanionsWithoutHardcodedArtifactNames() throws IOException {
+        String original = pomWithAlignedLogbackDependencies();
+        Files.writeString(project.resolve("pom.xml"), original);
+        PatchCandidate corePatch = directCandidate(
+                "ch.qos.logback", "logback-core", "1.5.32", "1.5.35", "CVE-logback"
+        );
+
+        try (PomPatchTransaction transaction = new MavenPomPatcher(logbackCompanions()).apply(
+                project, corePatch
+        )) {
+            assertEquals(2, transaction.mutationCount());
+            transaction.commit();
+        }
+
+        String expected = original
+                .replace("<artifactId>logback-classic</artifactId><version>1.5.32</version>",
+                        "<artifactId>logback-classic</artifactId><version>1.5.35</version>")
+                .replace("<artifactId>logback-core</artifactId><version>1.5.32</version>",
+                        "<artifactId>logback-core</artifactId><version>1.5.35</version>");
+        assertEquals(expected, Files.readString(project.resolve("pom.xml")));
+        assertTrue(Files.readString(project.resolve("pom.xml"))
+                .contains("<artifactId>logback-access</artifactId><version>1.5.32</version>"));
+    }
+
+    @Test
+    void rollsBackEveryAlignedCompanionWhenCompoundPatchFailsVerification() throws IOException {
+        String original = pomWithAlignedLogbackDependencies();
+        Files.writeString(project.resolve("pom.xml"), original);
+        PatchCandidate corePatch = directCandidate(
+                "ch.qos.logback", "logback-core", "1.5.32", "1.5.35", "CVE-logback"
+        );
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(logbackCompanions()),
+                (path, candidate) -> BuildVerificationResult.failure(1, "compound verification failed"),
+                PatchSecurityVerifier.accepting(),
+                ignored -> { }
+        ).applyRecommendedPatches(project, List.of(corePatch));
+
+        assertTrue(applied.isEmpty());
+        assertEquals(original, Files.readString(project.resolve("pom.xml")));
+    }
+
+    @Test
+    void alignsPublishedCompanionsInsideDependencyManagement() throws IOException {
+        String original = pomWithAlignedLogbackManagement();
+        Files.writeString(project.resolve("pom.xml"), original);
+        PatchCandidate managedCorePatch = managedCandidate(directCandidate(
+                "ch.qos.logback", "logback-core", "1.5.32", "1.5.35", "CVE-logback"
+        ));
+
+        try (PomPatchTransaction transaction = new MavenPomPatcher(logbackCompanions()).apply(
+                project, managedCorePatch
+        )) {
+            assertEquals(2, transaction.mutationCount());
+            transaction.commit();
+        }
+
+        assertEquals(2, Files.readString(project.resolve("pom.xml"))
+                .split("<version>1.5.35</version>", -1).length - 1);
+    }
+
+    @Test
     void rejectsDuplicateManagedDeclarationsWithDifferentVersionsWithoutChangingPom() throws IOException {
         String original = pomWithDuplicateManagedDependencies("1.0.0", "0.9.0");
         Files.writeString(project.resolve("pom.xml"), original);
@@ -466,7 +529,10 @@ class MavenPatchWorkflowTest {
     }
 
     private PatchCandidate managedCandidate(String currentVersion, String replacementVersion) {
-        PatchCandidate direct = directCandidate(currentVersion, replacementVersion);
+        return managedCandidate(directCandidate(currentVersion, replacementVersion));
+    }
+
+    private PatchCandidate managedCandidate(PatchCandidate direct) {
         ComponentCoordinate current = direct.mutationPoint().component();
         VersionOwner owner = new VersionOwner(
                 VersionOwnerType.DEPENDENCY_MANAGEMENT,
@@ -566,6 +632,62 @@ class MavenPatchWorkflowTest {
                   </dependencies>
                 </project>
                 """;
+    }
+
+    private String pomWithAlignedLogbackDependencies() {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencies>
+                    <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-classic</artifactId><version>1.5.32</version>
+                    </dependency>
+                    <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-core</artifactId><version>1.5.32</version>
+                    </dependency>
+                    <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-access</artifactId><version>1.5.32</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
+    }
+
+    private String pomWithAlignedLogbackManagement() {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-classic</artifactId>
+                        <version>1.5.32</version>
+                      </dependency>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>1.5.32</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+    }
+
+    private CompanionDependencyResolver logbackCompanions() {
+        return (groupId, artifactId, version) -> artifactId.equals("logback-classic")
+                ? List.of("logback-core")
+                : List.of();
     }
 
     private String pomWithProperty(String version) {
