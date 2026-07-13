@@ -49,6 +49,7 @@ final class SonatypePatchSecurityVerifier implements PatchSecurityVerifier {
                 original.getId().equals(vulnerability.getId())
                         && original.getGroupId().equals(vulnerability.getGroupId())
                         && original.getArtifactId().equals(vulnerability.getArtifactId())
+                        && original.getVersion().equals(vulnerability.getVersion())
         );
         if (stillVulnerable) {
             return SecurityVerificationResult.unsafe("Sonatype still reports " + original.getId());

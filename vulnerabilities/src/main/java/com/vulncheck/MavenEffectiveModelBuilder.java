@@ -126,7 +126,7 @@ public final class MavenEffectiveModelBuilder {
             return direct;
         }
 
-        PomDependency managed = findUniqueByGa(raw.dependencyManagement(), component);
+        PomDependency managed = findUnambiguousByGa(raw.dependencyManagement(), component, raw.properties());
         if (managed != null && !managed.isImportedBom()) {
             return List.of(ownerForDeclaration(
                     VersionOwnerType.DEPENDENCY_MANAGEMENT, component, managed.version(), pom, raw.properties()
@@ -134,17 +134,39 @@ public final class MavenEffectiveModelBuilder {
         }
 
         ComponentCoordinate source = effectiveDeclaration.source();
-        VersionOwner vo = new VersionOwner(VersionOwnerType.PARENT_POM, raw.parent(), null, pom);
         if (source != null) {
             ComponentCoordinate sourceBom = importedBoms.stream()
                     .filter(bom -> sameComponent(bom, source))
                     .findFirst()
                     .orElse(null);
             if (sourceBom != null) {
-                return List.of(new VersionOwner(VersionOwnerType.IMPORTED_BOM, sourceBom, null, pom));
+                PomDependency declaration = findUnambiguousByGa(
+                        raw.dependencyManagement(), sourceBom, raw.properties()
+                );
+                return declaration == null
+                        ? List.of()
+                        : List.of(ownerForDeclaration(
+                                VersionOwnerType.IMPORTED_BOM,
+                                sourceBom,
+                                declaration.version(),
+                                pom,
+                                raw.properties()
+                        ));
+            }
+            if (raw.project() != null && sameComponent(raw.project(), source)) {
+                // The current POM owns this entry, but its declarations disagree in a way
+                // that cannot be mutated safely as one semantic version owner.
+                return List.of();
             }
             if (raw.parent() != null && sameComponent(raw.parent(), source)) {
-                return List.of(vo);
+                return List.of(new VersionOwner(VersionOwnerType.PARENT_POM, raw.parent(), null, pom));
+            }
+            // Maven reports the leaf model that declared a managed dependency. A parent may
+            // itself inherit from or import that leaf model (for example Boot starter-parent
+            // -> spring-boot-dependencies). With no local BOM import, the raw parent is the
+            // only declaration capable of introducing this non-local effective entry.
+            if (raw.parent() != null && importedBoms.isEmpty()) {
+                return List.of(new VersionOwner(VersionOwnerType.PARENT_POM, raw.parent(), null, pom));
             }
         }
 
@@ -160,7 +182,7 @@ public final class MavenEffectiveModelBuilder {
     }
 
     private List<VersionOwner> directOwners(ComponentCoordinate component, Path pom, PomView raw) {
-        PomDependency direct = findUniqueByGa(raw.dependencies(), component);
+        PomDependency direct = findUnambiguousByGa(raw.dependencies(), component, raw.properties());
         if (direct == null || direct.version() == null || direct.version().isBlank()) {
             return List.of();
         }
@@ -183,12 +205,29 @@ public final class MavenEffectiveModelBuilder {
         return new VersionOwner(defaultType, component, null, pom);
     }
 
-    private PomDependency findUniqueByGa(List<PomDependency> dependencies, ComponentCoordinate component) {
+    private PomDependency findUnambiguousByGa(
+            List<PomDependency> dependencies,
+            ComponentCoordinate component,
+            Map<String, String> properties
+    ) {
         List<PomDependency> matches = dependencies.stream()
                 .filter(dependency -> component.groupId().equals(dependency.groupId()))
                 .filter(dependency -> component.artifactId().equals(dependency.artifactId()))
                 .toList();
-        return matches.size() == 1 ? matches.getFirst() : null;
+        if (matches.size() == 1) {
+            return matches.getFirst();
+        }
+        if (matches.isEmpty()) {
+            return null;
+        }
+
+        String versionExpression = matches.getFirst().version();
+        boolean sameDeclaration = matches.stream()
+                .allMatch(dependency -> Objects.equals(versionExpression, dependency.version()));
+        boolean sameResolvedComponent = matches.stream()
+                .map(dependency -> dependency.toCoordinate(properties))
+                .allMatch(component::equals);
+        return sameDeclaration && sameResolvedComponent ? matches.getFirst() : null;
     }
 
     private List<DependencyPath> readDependencyPaths(Path dependencyTree) {

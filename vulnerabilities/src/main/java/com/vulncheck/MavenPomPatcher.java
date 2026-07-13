@@ -100,14 +100,14 @@ public final class MavenPomPatcher {
         Element dependencies = section == DependencySection.DIRECT
                 ? child(project, "dependencies")
                 : child(child(project, "dependencyManagement"), "dependencies");
-        Element dependency = uniqueDependency(dependencies, component, false);
-        return setDependencyVersion(document, dependency, newVersion);
+        List<Element> matching = matchingDependencies(dependencies, component, false);
+        return setDependencyVersions(document, matching, component, newVersion);
     }
 
     private boolean updateImportedBom(Document document, ComponentCoordinate bom, String newVersion) {
         Element dependencies = child(child(document.getDocumentElement(), "dependencyManagement"), "dependencies");
-        Element dependency = uniqueDependency(dependencies, bom, true);
-        return setDependencyVersion(document, dependency, newVersion);
+        List<Element> matching = matchingDependencies(dependencies, bom, true);
+        return setDependencyVersions(document, matching, bom, newVersion);
     }
 
     private boolean updateParent(
@@ -149,9 +149,13 @@ public final class MavenPomPatcher {
         return groupId != null ? groupId : text(child(project, "parent"), "groupId");
     }
 
-    private Element uniqueDependency(Element dependencies, ComponentCoordinate component, boolean importedBom) {
+    private List<Element> matchingDependencies(
+            Element dependencies,
+            ComponentCoordinate component,
+            boolean importedBom
+    ) {
         if (dependencies == null || component == null) {
-            return null;
+            return List.of();
         }
         List<Element> matches = new ArrayList<>();
         for (Element dependency : children(dependencies, "dependency")) {
@@ -162,11 +166,31 @@ public final class MavenPomPatcher {
                 matches.add(dependency);
             }
         }
-        if (matches.size() > 1) {
-            throw new PomPatchException("Ambiguous dependency declaration for "
-                    + component.groupId() + ":" + component.artifactId());
+        return List.copyOf(matches);
+    }
+
+    private boolean setDependencyVersions(
+            Document document,
+            List<Element> dependencies,
+            ComponentCoordinate expected,
+            String newVersion
+    ) {
+        if (dependencies.isEmpty()) {
+            return false;
         }
-        return matches.isEmpty() ? null : matches.getFirst();
+        boolean matchesExpectedVersion = dependencies.stream()
+                .map(dependency -> text(dependency, "version"))
+                .allMatch(expected.version()::equals);
+        if (!matchesExpectedVersion) {
+            throw new PomPatchException("Stale or ambiguous dependency declaration for "
+                    + expected.groupId() + ":" + expected.artifactId()
+                    + "; entries do not all declare expected version " + expected.version());
+        }
+        boolean changed = false;
+        for (Element dependency : dependencies) {
+            changed |= setDependencyVersion(document, dependency, newVersion);
+        }
+        return changed;
     }
 
     private boolean isDefaultJarDependency(Element dependency) {

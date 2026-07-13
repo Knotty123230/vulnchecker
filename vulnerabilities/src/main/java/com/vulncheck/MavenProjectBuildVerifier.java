@@ -209,7 +209,6 @@ public final class MavenProjectBuildVerifier implements ProjectBuildVerifier {
         if (dependencyTree != null) {
             properties.setProperty("outputFile", dependencyTree.toAbsolutePath().toString());
             properties.setProperty("outputType", "json");
-            properties.setProperty("verbose", "true");
         }
         request.setProperties(properties);
         return request;

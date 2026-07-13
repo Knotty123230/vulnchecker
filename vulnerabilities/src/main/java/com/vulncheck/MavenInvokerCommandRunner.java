@@ -26,12 +26,18 @@ public final class MavenInvokerCommandRunner implements MavenCommandRunner {
             Path effectivePomOutput,
             Path dependencyTreeOutput
     ) {
-        Properties properties = new Properties();
-        properties.setProperty("verbose", "true");
-        properties.setProperty("output", effectivePomOutput.toAbsolutePath().toString());
-        properties.setProperty("outputFile", dependencyTreeOutput.toAbsolutePath().toString());
-        properties.setProperty("outputType", "json");
+        Properties effectivePomProperties = new Properties();
+        effectivePomProperties.setProperty("verbose", "true");
+        effectivePomProperties.setProperty("output", effectivePomOutput.toAbsolutePath().toString());
+        execute(pom, EFFECTIVE_POM_GOAL, effectivePomProperties, "effective POM generation");
 
+        Properties dependencyTreeProperties = new Properties();
+        dependencyTreeProperties.setProperty("outputFile", dependencyTreeOutput.toAbsolutePath().toString());
+        dependencyTreeProperties.setProperty("outputType", "json");
+        execute(pom, DEPENDENCY_TREE_GOAL, dependencyTreeProperties, "resolved dependency tree generation");
+    }
+
+    private void execute(Path pom, String goal, Properties properties, String operation) {
         InvocationRequest request = new DefaultInvocationRequest();
         request.setPomFile(pom.toFile());
         request.setBaseDirectory(pom.getParent().toFile());
@@ -42,7 +48,7 @@ public final class MavenInvokerCommandRunner implements MavenCommandRunner {
         request.setOutputHandler(SILENT);
         request.setErrorHandler(SILENT);
         request.setThreads("1C");
-        request.addArgs(List.of(EFFECTIVE_POM_GOAL, DEPENDENCY_TREE_GOAL));
+        request.addArgs(List.of(goal));
         request.setProperties(properties);
 
         try {
@@ -54,12 +60,12 @@ public final class MavenInvokerCommandRunner implements MavenCommandRunner {
             InvocationResult result = invoker.execute(request);
             if (result.getExitCode() != 0) {
                 throw new MavenAnalysisException(
-                        "Maven analysis failed with exit code " + result.getExitCode(),
+                        "Maven " + operation + " failed with exit code " + result.getExitCode(),
                         result.getExecutionException()
                 );
             }
         } catch (MavenInvocationException exception) {
-            throw new MavenAnalysisException("Unable to execute Maven for " + pom, exception);
+            throw new MavenAnalysisException("Unable to execute Maven " + operation + " for " + pom, exception);
         }
     }
 }

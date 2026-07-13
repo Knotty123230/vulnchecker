@@ -61,10 +61,11 @@ public final class RepositoryCandidateGenerator implements CandidateGenerator {
 
     private ComponentCoordinate repositoryTarget(MutationPoint point, Vulnerability vulnerability) {
         return switch (point.type()) {
-            case UPDATE_PROPERTY, UPDATE_DIRECT_DEPENDENCY, UPDATE_DEPENDENCY_MANAGEMENT ->
+            case UPDATE_DIRECT_DEPENDENCY, UPDATE_DEPENDENCY_MANAGEMENT ->
                     new ComponentCoordinate(
                             vulnerability.getGroupId(), vulnerability.getArtifactId(), vulnerability.getVersion()
                     );
+            case UPDATE_PROPERTY -> point.component();
             case UPDATE_IMPORTED_BOM, UPDATE_PARENT_DEPENDENCY, UPDATE_PARENT_POM -> point.component();
         };
     }

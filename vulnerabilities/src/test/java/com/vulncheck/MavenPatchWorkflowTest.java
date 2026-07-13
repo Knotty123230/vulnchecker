@@ -202,6 +202,42 @@ class MavenPatchWorkflowTest {
     }
 
     @Test
+    void retriesEarlierBuildFailureAfterLaterPatchChangesDependencyGraph() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithTwoDependencies());
+        PatchCandidate first = directCandidate("com.example", "library-a", "1.0.0", "1.1.0", "CVE-a");
+        PatchCandidate graphUnlock = directCandidate(
+                "com.example", "library-b", "1.0.0", "1.1.0", "CVE-b"
+        );
+        AtomicBoolean graphWasUnlocked = new AtomicBoolean();
+        ProjectBuildVerifier verifier = new ProjectBuildVerifier() {
+            @Override
+            public BuildVerificationResult verify(Path path, PatchCandidate candidate) {
+                boolean firstCandidate = candidate.mutationPoint().component().artifactId().equals("library-a");
+                return !firstCandidate || graphWasUnlocked.get()
+                        ? BuildVerificationResult.success()
+                        : BuildVerificationResult.failure(1, "alignment is not ready");
+            }
+
+            @Override
+            public void patchCommitted(Path path, PatchCandidate candidate) {
+                if (candidate.mutationPoint().component().artifactId().equals("library-b")) {
+                    graphWasUnlocked.set(true);
+                }
+            }
+        };
+
+        List<AppliedPatch> applied = new MavenPatchWorkflow(
+                new MavenPomPatcher(), verifier, PatchSecurityVerifier.accepting(), ignored -> { }
+        ).applyRecommendedPatches(project, List.of(first, graphUnlock));
+
+        assertEquals(2, applied.size());
+        String patched = Files.readString(project.resolve("pom.xml"));
+        assertTrue(patched.contains("<artifactId>library-a</artifactId>"));
+        assertTrue(patched.contains("<artifactId>library-b</artifactId>"));
+        assertEquals(2, patched.split("<version>1.1.0</version>", -1).length - 1);
+    }
+
+    @Test
     void commitsOnlyFirstSuccessfulAlternativeForOneVulnerability() throws IOException {
         Files.writeString(project.resolve("pom.xml"), pomWithDependency("1.0.0"));
         PatchCandidate first = directCandidate("1.0.0", "1.1.0");
@@ -302,6 +338,44 @@ class MavenPatchWorkflowTest {
         assertEquals(childPom, Files.readString(child.resolve("pom.xml")));
     }
 
+    @Test
+    void updatesEverySemanticallyIdenticalDuplicateManagedDeclaration() throws IOException {
+        Files.writeString(project.resolve("pom.xml"), pomWithDuplicateManagedDependencies("1.0.0", "1.0.0"));
+
+        PomPatchTransaction transaction = new MavenPomPatcher().apply(
+                project,
+                managedCandidate("1.0.0", "1.1.0")
+        );
+
+        String patched = Files.readString(project.resolve("pom.xml"));
+        assertEquals(2, patched.split("<version>1.1.0</version>", -1).length - 1);
+        transaction.commit();
+    }
+
+    @Test
+    void rejectsDuplicateManagedDeclarationsWithDifferentVersionsWithoutChangingPom() throws IOException {
+        String original = pomWithDuplicateManagedDependencies("1.0.0", "0.9.0");
+        Files.writeString(project.resolve("pom.xml"), original);
+
+        assertThrows(
+                PomPatchException.class,
+                () -> new MavenPomPatcher().apply(project, managedCandidate("1.0.0", "1.1.0"))
+        );
+        assertEquals(original, Files.readString(project.resolve("pom.xml")));
+    }
+
+    @Test
+    void rejectsStaleCandidateInsteadOfOverwritingAlreadyChangedDependency() throws IOException {
+        String original = pomWithDependency("1.2.0");
+        Files.writeString(project.resolve("pom.xml"), original);
+
+        assertThrows(
+                PomPatchException.class,
+                () -> new MavenPomPatcher().apply(project, directCandidate("1.0.0", "1.1.0"))
+        );
+        assertEquals(original, Files.readString(project.resolve("pom.xml")));
+    }
+
     private PatchCandidate directCandidate(String currentVersion, String replacementVersion) {
         Vulnerability vulnerability = vulnerability(currentVersion, replacementVersion);
         DependencyNode node = node(currentVersion);
@@ -322,6 +396,59 @@ class MavenPatchWorkflowTest {
                 List.of()
         );
         return new PatchCandidate(point, fix);
+    }
+
+    private PatchCandidate directCandidate(
+            String groupId,
+            String artifactId,
+            String currentVersion,
+            String replacementVersion,
+            String vulnerabilityId
+    ) {
+        Vulnerability vulnerability = new Vulnerability(
+                vulnerabilityId, groupId, artifactId, currentVersion, "high", "", ""
+        );
+        ComponentCoordinate current = new ComponentCoordinate(groupId, artifactId, currentVersion);
+        ComponentCoordinate replacement = new ComponentCoordinate(groupId, artifactId, replacementVersion);
+        vulnerability.setRemediationCandidate(new RemediationCandidate("upgrade", replacement, true, List.of()));
+        DependencyNode dependency = new DependencyNode(artifactId, groupId, currentVersion, "compile", List.of());
+        return new PatchCandidate(
+                new MutationPoint(
+                        MutationType.UPDATE_DIRECT_DEPENDENCY,
+                        current,
+                        dependency,
+                        new VersionOwner(
+                                VersionOwnerType.DIRECT_DEPENDENCY, current, null, project.resolve("pom.xml")
+                        )
+                ),
+                new FixCandidate(
+                        vulnerability,
+                        dependency,
+                        new FixCandidate.ComponentFix(List.of(), replacement),
+                        true,
+                        List.of()
+                )
+        );
+    }
+
+    private PatchCandidate managedCandidate(String currentVersion, String replacementVersion) {
+        PatchCandidate direct = directCandidate(currentVersion, replacementVersion);
+        ComponentCoordinate current = direct.mutationPoint().component();
+        VersionOwner owner = new VersionOwner(
+                VersionOwnerType.DEPENDENCY_MANAGEMENT,
+                current,
+                null,
+                project.resolve("pom.xml")
+        );
+        return new PatchCandidate(
+                new MutationPoint(
+                        MutationType.UPDATE_DEPENDENCY_MANAGEMENT,
+                        current,
+                        direct.mutationPoint().resolvedNode(),
+                        owner
+                ),
+                direct.candidate()
+        );
     }
 
     private Vulnerability vulnerability(String currentVersion, String replacementVersion) {
@@ -357,6 +484,54 @@ class MavenPatchWorkflowTest {
                   </dependencies>
                 </project>
                 """.formatted(version);
+    }
+
+    private String pomWithDuplicateManagedDependencies(String firstVersion, String secondVersion) {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>io.netty</groupId>
+                        <artifactId>netty-handler</artifactId>
+                        <version>%s</version>
+                      </dependency>
+                      <dependency>
+                        <groupId>io.netty</groupId>
+                        <artifactId>netty-handler</artifactId>
+                        <version>%s</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """.formatted(firstVersion, secondVersion);
+    }
+
+    private String pomWithTwoDependencies() {
+        return """
+                <project xmlns="http://maven.apache.org/POM/4.0.0">
+                  <modelVersion>4.0.0</modelVersion>
+                  <groupId>com.example</groupId>
+                  <artifactId>application</artifactId>
+                  <version>1.0.0</version>
+                  <dependencies>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>library-a</artifactId>
+                      <version>1.0.0</version>
+                    </dependency>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>library-b</artifactId>
+                      <version>1.0.0</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
     }
 
     private String pomWithProperty(String version) {

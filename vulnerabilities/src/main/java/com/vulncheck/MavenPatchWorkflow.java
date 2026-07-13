@@ -49,15 +49,38 @@ public final class MavenPatchWorkflow {
 
         Map<String, ActionStatus> actionCache = new HashMap<>();
         List<AppliedPatch> applied = new ArrayList<>();
-        alternativesByVulnerability.forEach((ignored, alternatives) ->
-                tryAlternatives(projectPath, alternatives, applied, actionCache));
+        List<List<PatchCandidate>> pending = new ArrayList<>(alternativesByVulnerability.values());
+        int pass = 1;
+        while (!pending.isEmpty()) {
+            if (pass > 1) {
+                console.accept("");
+                console.accept("Retrying " + pending.size()
+                        + " unresolved patch group(s) after dependency graph changes.");
+            }
+            int appliedBeforePass = applied.size();
+            List<List<PatchCandidate>> unresolved = new ArrayList<>();
+            for (List<PatchCandidate> alternatives : pending) {
+                if (!tryAlternatives(projectPath, alternatives, applied, actionCache)) {
+                    unresolved.add(alternatives);
+                }
+            }
+            if (applied.size() == appliedBeforePass) {
+                break;
+            }
+
+            // A committed parent/BOM/dependency change can make a previous convergence
+            // failure obsolete. Only committed actions remain cacheable across graph states.
+            actionCache.entrySet().removeIf(entry -> entry.getValue() == ActionStatus.BUILD_FAILED);
+            pending = unresolved;
+            pass++;
+        }
 
         console.accept("");
         console.accept("Applied " + applied.size() + " verified patch(es).");
         return List.copyOf(applied);
     }
 
-    private void tryAlternatives(
+    private boolean tryAlternatives(
             Path projectPath,
             List<PatchCandidate> alternatives,
             List<AppliedPatch> applied,
@@ -78,7 +101,7 @@ public final class MavenPatchWorkflow {
                 SecurityVerificationResult security = securityVerifier.verify(projectPath, candidate);
                 if (security.safe()) {
                     console.accept("  CACHE-HIT " + describe(candidate) + " (already applied and CVE verified)");
-                    return;
+                    return true;
                 }
                 console.accept("  CACHE-MISS " + describe(candidate) + messageSuffix(security.failure()));
                 continue;
@@ -122,13 +145,14 @@ public final class MavenPatchWorkflow {
                 actionCache.put(actionKey, ActionStatus.COMMITTED);
                 applied.add(new AppliedPatch(candidate, verification));
                 console.accept("  OK   patch committed");
-                return;
+                return true;
             } catch (RuntimeException exception) {
                 console.accept("  SKIP " + exception.getMessage());
             }
         }
 
         console.accept("  NONE no candidate passed verification");
+        return false;
     }
 
     private String describe(PatchCandidate candidate) {

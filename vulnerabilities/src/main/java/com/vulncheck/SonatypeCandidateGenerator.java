@@ -40,8 +40,11 @@ public final class SonatypeCandidateGenerator implements CandidateGenerator {
         if (mutationPoint.type() == MutationType.UPDATE_DIRECT_DEPENDENCY) {
             return remediation.directDependency() ? remediation.target() : null;
         }
+        if (mutationPoint.type() == MutationType.UPDATE_DEPENDENCY_MANAGEMENT) {
+            return remediation.target();
+        }
         if (mutationPoint.type() == MutationType.UPDATE_PROPERTY
-                || mutationPoint.type() == MutationType.UPDATE_DEPENDENCY_MANAGEMENT) {
+                && sameComponent(mutationPoint.component(), remediation.target())) {
             return remediation.target();
         }
 
@@ -66,7 +69,8 @@ public final class SonatypeCandidateGenerator implements CandidateGenerator {
     }
 
     private boolean sameComponent(ComponentCoordinate first, ComponentCoordinate second) {
-        return first.groupId().equals(second.groupId())
+        return first != null && second != null
+                && first.groupId().equals(second.groupId())
                 && first.artifactId().equals(second.artifactId());
     }
 

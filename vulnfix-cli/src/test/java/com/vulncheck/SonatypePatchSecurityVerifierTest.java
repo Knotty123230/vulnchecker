@@ -34,6 +34,18 @@ class SonatypePatchSecurityVerifierTest {
         assertTrue(verifier.verify(null, candidate(original)).safe());
     }
 
+    @Test
+    void doesNotConfuseSameFindingOnAnotherBaselineVersionWithFailedPatch() {
+        Vulnerability original = vulnerability("CVE-old", "library", "1.0.0", "high");
+        Vulnerability otherResolvedVersion = vulnerability("CVE-old", "library", "0.9.0", "high");
+        var verifier = verifier(
+                List.of(original, otherResolvedVersion),
+                List.of(otherResolvedVersion)
+        );
+
+        assertTrue(verifier.verify(null, candidate(original)).safe());
+    }
+
     private SonatypePatchSecurityVerifier verifier(List<Vulnerability> baseline, List<Vulnerability> afterPatch) {
         DependencyNode tree = new DependencyNode("application", "com.example", "1.0.0", "compile", List.of());
         return new SonatypePatchSecurityVerifier("application", ignored -> tree,

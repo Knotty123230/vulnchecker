@@ -47,7 +47,7 @@ public final class RemediationMutationPointResolver implements MutationPointReso
         )));
 
         resolvedOwners.forEach(owner -> {
-            List<DependencyNode> ownerNodes = ownerTargetsVulnerableComponent(owner)
+            List<DependencyNode> ownerNodes = ownerTargetsVulnerableComponent(owner, vulnerable)
                     ? vulnerableNodes
                     : findNodes(graph, owner.coordinate());
             if (ownerNodes.isEmpty()) {
@@ -95,10 +95,17 @@ public final class RemediationMutationPointResolver implements MutationPointReso
         return points.stream().distinct().toList();
     }
 
-    private boolean ownerTargetsVulnerableComponent(VersionOwner owner) {
-        return owner.type() == VersionOwnerType.LOCAL_PROPERTY
+    private boolean ownerTargetsVulnerableComponent(VersionOwner owner, ComponentCoordinate vulnerable) {
+        return (owner.type() == VersionOwnerType.LOCAL_PROPERTY
+                && sameComponent(owner.coordinate(), vulnerable))
                 || owner.type() == VersionOwnerType.DEPENDENCY_MANAGEMENT
                 || owner.type() == VersionOwnerType.DIRECT_DEPENDENCY;
+    }
+
+    private boolean sameComponent(ComponentCoordinate first, ComponentCoordinate second) {
+        return first != null && second != null
+                && first.groupId().equals(second.groupId())
+                && first.artifactId().equals(second.artifactId());
     }
 
     private List<ComponentCoordinate> sonatypeParents(RemediationCandidate remediation) {

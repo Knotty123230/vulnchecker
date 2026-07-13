@@ -154,6 +154,28 @@ class RepositoryCandidateGeneratorTest {
         assertEquals("3.0.1", candidates.getFirst().candidate().replacement().coordinate().version());
     }
 
+    @Test
+    void repositoryCandidateForBomVersionPropertyTargetsBomRatherThanVulnerableChild() {
+        Vulnerability vulnerability = vulnerability(null);
+        ComponentCoordinate bom = new ComponentCoordinate("com.example", "platform-bom", "3.5.14");
+        MutationPoint point = new MutationPoint(
+                MutationType.UPDATE_PROPERTY,
+                bom,
+                node(),
+                new VersionOwner(VersionOwnerType.LOCAL_PROPERTY, bom, "platform.version", null)
+        );
+        RepositoryCandidateGenerator generator = new RepositoryCandidateGenerator(
+                coordinate -> coordinate.equals(bom) ? List.of("3.5.15") : List.of(),
+                new StableMavenVersionPolicy()
+        );
+
+        List<PatchCandidate> candidates = generator.generate(point, null, vulnerability);
+
+        assertEquals(1, candidates.size());
+        assertEquals("platform-bom", candidates.getFirst().candidate().replacement().coordinate().artifactId());
+        assertEquals("3.5.15", candidates.getFirst().candidate().replacement().coordinate().version());
+    }
+
     private Vulnerability vulnerability(String remediationVersion) {
         Vulnerability vulnerability = new Vulnerability(
                 "CVE-test", "com.example", "library", "1.2.0", "high", "", ""

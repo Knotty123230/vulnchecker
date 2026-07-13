@@ -46,7 +46,6 @@ public class MavenDependencyNodeFinder implements DependencyNodeFinder {
         command.add(DEPENDENCY_TREE_GOAL);
         command.add("-DoutputFile=" + depTree.toAbsolutePath());
         command.add("-DoutputType=json");
-        command.add("-Dverbose=true");
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         processBuilder.directory(pom.getParent().toFile());
         processBuilder.inheritIO();
